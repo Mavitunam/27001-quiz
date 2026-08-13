@@ -268,7 +268,7 @@ async function doLogin(){
     state.errorMsg = '';
     await enterSetup();
   }catch(e){
-    state.errorMsg = 'Giriş başarısız: ' + e.message;
+    state.errorMsg = 'E-posta veya şifre hatalı.';
     render();
   }
 }
@@ -319,7 +319,7 @@ async function saveTemplate(){
     await loadTemplates();
     render();
   }catch(e){
-    alert('Kaydedilemedi: ' + e.message);
+    alert('Kaydedilemedi, tekrar dener misin?');
   }
 }
 
@@ -338,7 +338,7 @@ async function deleteTemplate(id){
     await loadTemplates();
     render();
   }catch(e){
-    alert('Silinemedi: ' + e.message);
+    alert('Silinemedi, tekrar dener misin?');
   }
 }
 
@@ -372,7 +372,7 @@ async function launchSession(){
   try{
     await db.collection('quizzes').doc(code).set(quiz);
   }catch(e){
-    state.errorMsg = 'Oturum oluşturulamadı: ' + e.message;
+    state.errorMsg = 'Oturum oluşturulamadı, tekrar dener misin?';
     render();
     return;
   }
@@ -487,7 +487,7 @@ async function joinSession(){
   try{
     quizSnap = await db.collection('quizzes').doc(code).get();
   }catch(e){
-    state.errorMsg = 'Bağlantı hatası: ' + e.message;
+    state.errorMsg = 'Bağlantı hatası, tekrar dener misin?';
     render();
     return;
   }
