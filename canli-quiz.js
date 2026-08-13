@@ -315,7 +315,7 @@ async function launchSession(){
     return;
   }
   const code = genCode();
-  const quiz = { questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false };
+  const quiz = { questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false, questionStartedAt: Date.now() };
   try{
     await db.collection('quizzes').doc(code).set(quiz);
   }catch(e){
@@ -367,6 +367,7 @@ async function nextQuestion(){
   }
   state.quiz.currentIndex += 1;
   state.quiz.revealed = false;
+  state.quiz.questionStartedAt = Date.now();
   await db.collection('quizzes').doc(state.code).set(state.quiz);
   render();
   subscribeHostAnswers();
@@ -417,6 +418,8 @@ async function joinSession(){
   state.name = name;
   state.participantId = genId();
   state.myScore = 0;
+  state.myCorrectCount = 0;
+  state.myAnsweredCount = 0;
   state.answeredThisQ = false;
   state.myAnswerIdx = null;
   state.errorMsg = '';
@@ -446,27 +449,36 @@ async function submitAnswer(idx){
   const qIndex = state.quiz.currentIndex;
   const question = state.quiz.questions[qIndex];
   const isCorrect = idx === question.correct;
+  const startedAt = state.quiz.questionStartedAt || Date.now();
+  const elapsedSec = Math.max(0, (Date.now() - startedAt) / 1000);
+  // Kahoot tarzı: doğru cevap hızlıysa daha yüksek puan (max 1000, 20 sn sonra taban 200'e iner)
+  const points = isCorrect ? Math.round(Math.max(200, 1000 - elapsedSec * 40)) : 0;
   state.answeredThisQ = true;
   state.myAnswerIdx = idx;
-  if(isCorrect) state.myScore += 1;
+  state.myScore += points;
+  state.myCorrectCount = (state.myCorrectCount || 0) + (isCorrect ? 1 : 0);
+  state.myAnsweredCount = (state.myAnsweredCount || 0) + 1;
   render();
   try{
     await db.collection('quizzes').doc(state.code).collection('answers')
       .doc(qIndex + '_' + state.participantId).set({
-        qIndex, name: state.name, choice: idx, correct: isCorrect, participantId: state.participantId
+        qIndex, name: state.name, choice: idx, correct: isCorrect, points, participantId: state.participantId
       });
     await db.collection('quizzes').doc(state.code).collection('scores')
       .doc(state.participantId).set({
-        name: state.name, score: state.myScore
+        name: state.name, score: state.myScore,
+        correctCount: state.myCorrectCount, answeredCount: state.myAnsweredCount
       });
   }catch(e){}
 }
+
 
 function leaveSession(){
   stopListeners();
   state = {
     view:'home', code:'', name:'', quiz:null, draftQuestions:[],
     participantId:null, answeredThisQ:false, myAnswerIdx:null, myScore:0,
+    myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
     unsubQuiz:null, unsubAnswers:null
   };
@@ -595,13 +607,17 @@ function hostLiveView(){
 }
 
 function hostResultsView(){
-  const rows = (state.leaderboard || []).map((r,i)=>`
+  const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
+  const rows = (state.leaderboard || []).map((r,i)=>{
+    const c = r.correctCount || 0;
+    const wrong = Math.max(0, (r.answeredCount||0) - c);
+    return `
     <div class="leaderboard-row">
       <span class="rank">${i+1}</span>
-      <span class="nm">${escapeHtml(r.name)}</span>
-      <span class="sc">${r.score}</span>
+      <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış</span></span>
+      <span class="sc">${r.score} p</span>
     </div>
-  `).join('');
+  `;}).join('');
   return `
     <div class="eyebrow">Oturum Bitti</div>
     <h2>Sonuçlar</h2>
