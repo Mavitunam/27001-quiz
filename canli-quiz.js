@@ -199,6 +199,7 @@ let state = {
   name: '',
   quiz: null,
   draftQuestions: [],
+  editingIndex: null,
   participantId: null,
   answeredThisQ: false,
   myAnswerIdx: null,
@@ -280,6 +281,7 @@ function doLogout(){
 
 async function enterSetup(){
   state.view = 'host-setup';
+  state.editingIndex = null;
   if(state.draftQuestions.length === 0){
     state.draftQuestions = [
       { q: 'Türkiye\'nin başkenti neresidir?', options: ['İstanbul','Ankara','İzmir','Bursa'], correct: 1 }
@@ -351,13 +353,31 @@ function addDraftQuestion(){
     render();
     return;
   }
-  state.draftQuestions.push({ q: qInput, options: opts, correct });
+  if(state.editingIndex !== null && state.editingIndex !== undefined){
+    state.draftQuestions[state.editingIndex] = { q: qInput, options: opts, correct };
+    state.editingIndex = null;
+  } else {
+    state.draftQuestions.push({ q: qInput, options: opts, correct });
+  }
+  state.errorMsg = '';
+  render();
+}
+
+function editDraftQuestion(idx){
+  state.editingIndex = idx;
+  state.errorMsg = '';
+  render();
+}
+
+function cancelEditDraftQuestion(){
+  state.editingIndex = null;
   state.errorMsg = '';
   render();
 }
 
 function removeDraftQuestion(idx){
   state.draftQuestions.splice(idx,1);
+  if(state.editingIndex === idx) state.editingIndex = null;
   render();
 }
 
@@ -605,11 +625,11 @@ async function submitAnswer(idx){
 function leaveSession(){
   stopListeners();
   state = {
-    view:'home', code:'', name:'', quiz:null, draftQuestions:[],
+    view:'home', code:'', name:'', quiz:null, draftQuestions:[], editingIndex:null,
     participantId:null, answeredThisQ:false, myAnswerIdx:null, myScore:0,
     myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
-    unsubQuiz:null, unsubAnswers:null
+    unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false
   };
   render();
 }
@@ -662,10 +682,14 @@ function homeView(){
 }
 
 function hostSetupView(){
+  const editQ = (state.editingIndex !== null && state.editingIndex !== undefined) ? state.draftQuestions[state.editingIndex] : null;
   const qItems = state.draftQuestions.map((q,i)=>`
-    <div class="qlist-item">
+    <div class="qlist-item" style="${i===state.editingIndex ? 'outline:2px solid var(--gold);' : ''}">
       <span>${i+1}. ${escapeHtml(q.q)}</span>
-      <button class="small-x" onclick="cqApp.removeDraftQuestion(${i})">✕</button>
+      <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;">
+        <button class="muted-link" onclick="cqApp.editDraftQuestion(${i})">Düzenle</button>
+        <button class="small-x" onclick="cqApp.removeDraftQuestion(${i})">✕</button>
+      </div>
     </div>
   `).join('');
 
@@ -692,22 +716,25 @@ function hostSetupView(){
     <h2>Soruları hazırla</h2>
     ${templatesSection}
     <div class="card">
-      <input type="text" id="draftQText" placeholder="Soru metni">
+      <input type="text" id="draftQText" placeholder="Soru metni" value="${editQ ? escapeHtml(editQ.q) : ''}">
       <div class="qopt"><div class="shape" style="background:var(--lime)"></div>
-        <input type="text" id="draftOpt0" placeholder="Seçenek 1">
-        <input type="radio" name="draftCorrect" value="0" checked></div>
+        <input type="text" id="draftOpt0" placeholder="Seçenek 1" value="${editQ ? escapeHtml(editQ.options[0]) : ''}">
+        <input type="radio" name="draftCorrect" value="0" ${(!editQ && true) || (editQ && editQ.correct===0) ? 'checked' : ''}></div>
       <div class="qopt"><div class="shape" style="background:var(--cyan)"></div>
-        <input type="text" id="draftOpt1" placeholder="Seçenek 2">
-        <input type="radio" name="draftCorrect" value="1"></div>
+        <input type="text" id="draftOpt1" placeholder="Seçenek 2" value="${editQ ? escapeHtml(editQ.options[1]) : ''}">
+        <input type="radio" name="draftCorrect" value="1" ${editQ && editQ.correct===1 ? 'checked' : ''}></div>
       <div class="qopt"><div class="shape" style="background:var(--gold)"></div>
-        <input type="text" id="draftOpt2" placeholder="Seçenek 3">
-        <input type="radio" name="draftCorrect" value="2"></div>
+        <input type="text" id="draftOpt2" placeholder="Seçenek 3" value="${editQ ? escapeHtml(editQ.options[2]) : ''}">
+        <input type="radio" name="draftCorrect" value="2" ${editQ && editQ.correct===2 ? 'checked' : ''}></div>
       <div class="qopt"><div class="shape" style="background:var(--coral)"></div>
-        <input type="text" id="draftOpt3" placeholder="Seçenek 4">
-        <input type="radio" name="draftCorrect" value="3"></div>
+        <input type="text" id="draftOpt3" placeholder="Seçenek 4" value="${editQ ? escapeHtml(editQ.options[3]) : ''}">
+        <input type="radio" name="draftCorrect" value="3" ${editQ && editQ.correct===3 ? 'checked' : ''}></div>
       <p style="font-size:12px;margin:2px 0 12px;">İşaretli radyo butonu doğru cevabı gösterir.</p>
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
-      <button class="btn btn-secondary" onclick="cqApp.addDraftQuestion()">+ Soruyu Ekle</button>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="cqApp.addDraftQuestion()">${editQ ? '✓ Güncelle' : '+ Soruyu Ekle'}</button>
+        ${editQ ? '<button class="btn btn-secondary" onclick="cqApp.cancelEditDraftQuestion()">Vazgeç</button>' : ''}
+      </div>
     </div>
     ${state.draftQuestions.length ? `<div class="card"><h3 style="font-size:15px;">Sorular (${state.draftQuestions.length})</h3>${qItems}
       <button class="btn btn-secondary" style="margin-top:4px;" onclick="cqApp.saveTemplate()">💾 Şablon Olarak Kaydet</button>
@@ -852,7 +879,7 @@ window.cqApp = {
   startHostSetup, addDraftQuestion, removeDraftQuestion, launchSession,
   revealCurrent, nextQuestion, startJoinFlow, joinSession, submitAnswer,
   leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
-  doLogin, doLogout
+  doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion
 };
 
 render();
