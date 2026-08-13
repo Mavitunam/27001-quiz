@@ -392,6 +392,13 @@ function startJoinFlow(){
   render();
 }
 
+function getStoredParticipantId(code){
+  try{ return localStorage.getItem('cqz_pid_' + code); }catch(e){ return null; }
+}
+function storeParticipantId(code, pid){
+  try{ localStorage.setItem('cqz_pid_' + code, pid); }catch(e){}
+}
+
 async function joinSession(){
   const code = document.getElementById('joinCode').value.trim();
   const name = document.getElementById('joinName').value.trim();
@@ -416,12 +423,43 @@ async function joinSession(){
   state.quiz = quizSnap.data();
   state.code = code;
   state.name = name;
-  state.participantId = genId();
+
+  // Aynı cihazdan daha önce bu koda katılmışsa aynı kimliği kullan
+  let pid = getStoredParticipantId(code);
+  if(!pid){
+    pid = genId();
+    storeParticipantId(code, pid);
+  }
+  state.participantId = pid;
+
+  // Önceki skoru geri yükle (varsa)
   state.myScore = 0;
   state.myCorrectCount = 0;
   state.myAnsweredCount = 0;
+  try{
+    const scoreSnap = await db.collection('quizzes').doc(code).collection('scores').doc(pid).get();
+    if(scoreSnap.exists){
+      const sd = scoreSnap.data();
+      state.myScore = sd.score || 0;
+      state.myCorrectCount = sd.correctCount || 0;
+      state.myAnsweredCount = sd.answeredCount || 0;
+    }
+  }catch(e){}
+
+  // Mevcut soru için daha önce cevap verilmiş mi kontrol et
   state.answeredThisQ = false;
   state.myAnswerIdx = null;
+  try{
+    const qIndex = state.quiz.currentIndex;
+    const ansSnap = await db.collection('quizzes').doc(code).collection('answers')
+      .doc(qIndex + '_' + pid).get();
+    if(ansSnap.exists){
+      const ad = ansSnap.data();
+      state.answeredThisQ = true;
+      state.myAnswerIdx = ad.choice;
+    }
+  }catch(e){}
+
   state.errorMsg = '';
   state.view = 'participant-live';
   render();
@@ -430,12 +468,21 @@ async function joinSession(){
 
 function subscribeParticipant(){
   if(state.unsubQuiz) state.unsubQuiz();
-  state.unsubQuiz = db.collection('quizzes').doc(state.code).onSnapshot((snap) => {
+  state.unsubQuiz = db.collection('quizzes').doc(state.code).onSnapshot(async (snap) => {
     if(!snap.exists) return;
     const fresh = snap.data();
     if(!state.quiz || fresh.currentIndex !== state.quiz.currentIndex){
       state.answeredThisQ = false;
       state.myAnswerIdx = null;
+      // Yeni soruya geçildiğinde de olası önceki cevabı kontrol et (ör. iki sekme açıksa)
+      try{
+        const ansSnap = await db.collection('quizzes').doc(state.code).collection('answers')
+          .doc(fresh.currentIndex + '_' + state.participantId).get();
+        if(ansSnap.exists){
+          state.answeredThisQ = true;
+          state.myAnswerIdx = ansSnap.data().choice;
+        }
+      }catch(e){}
     }
     state.quiz = fresh;
     if(state.view === 'participant-live') render();
