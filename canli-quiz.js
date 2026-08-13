@@ -61,12 +61,12 @@
 #canli-quiz-widget .btn-gold{background:var(--gold);}
 #canli-quiz-widget .btn:disabled{opacity:.4;cursor:not-allowed;}
 #canli-quiz-widget .btn-row{display:flex;gap:10px;}
-#canli-quiz-widget input[type=text]{
+#canli-quiz-widget input[type=text],#canli-quiz-widget input[type=password]{
   width:100%;background:var(--surface-2);border:1px solid rgba(255,255,255,0.1);
   color:var(--text);border-radius:12px;padding:13px 14px;font-size:15px;font-family:var(--font-body);
   margin-bottom:10px;
 }
-#canli-quiz-widget input[type=text]:focus{outline:2px solid var(--lime);}
+#canli-quiz-widget input[type=text]:focus,#canli-quiz-widget input[type=password]:focus{outline:2px solid var(--lime);}
 #canli-quiz-widget .code-display{
   font-family:var(--font-display);font-weight:800;font-size:36px;letter-spacing:.08em;
   text-align:center;color:var(--lime);margin:10px 0 4px;
@@ -156,7 +156,10 @@
 
   loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js')
     .then(function(){
-      return loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js');
+      return Promise.all([
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js')
+      ]);
     })
     .then(function(){
       runApp();
@@ -179,10 +182,8 @@ const firebaseConfig = {
 
 const fbApp = firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+const auth = firebase.auth();
 
-// Oturum oluşturma şifresi — sadece bunu bilen kişi oturum açabilir.
-// Değiştirmek için tırnak içindeki metni kendi şifrenle değiştir.
-const HOST_PASSWORD = "DEGISTIR123";
 const QUESTION_SECONDS = 15;
 
 const SHAPES = [
@@ -245,11 +246,39 @@ function goHome(){
 }
 
 async function startHostSetup(){
-  const pass = prompt('Oturum oluşturmak için şifre gir:');
-  if(pass !== HOST_PASSWORD){
-    if(pass !== null) alert('Şifre yanlış.');
+  if(auth.currentUser){
+    await enterSetup();
     return;
   }
+  state.view = 'login';
+  state.errorMsg = '';
+  render();
+}
+
+async function doLogin(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const pw = document.getElementById('loginPass').value;
+  if(!email || !pw){
+    state.errorMsg = 'E-posta ve şifre gir.';
+    render();
+    return;
+  }
+  try{
+    await auth.signInWithEmailAndPassword(email, pw);
+    state.errorMsg = '';
+    await enterSetup();
+  }catch(e){
+    state.errorMsg = 'Giriş başarısız: ' + e.message;
+    render();
+  }
+}
+
+function doLogout(){
+  auth.signOut();
+  goHome();
+}
+
+async function enterSetup(){
   state.view = 'host-setup';
   if(state.draftQuestions.length === 0){
     state.draftQuestions = [
@@ -588,6 +617,7 @@ function leaveSession(){
 function viewFor(view){
   switch(view){
     case 'home': return homeView();
+    case 'login': return loginView();
     case 'host-setup': return hostSetupView();
     case 'host-live': return hostLiveView();
     case 'host-results': return hostResultsView();
@@ -595,6 +625,20 @@ function viewFor(view){
     case 'participant-live': return participantLiveView();
     default: return homeView();
   }
+}
+
+function loginView(){
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div>
+    <div class="eyebrow">Yönetici Girişi</div>
+    <h2>Oturum oluşturmak için giriş yap</h2>
+    <div class="card">
+      <input type="text" id="loginEmail" placeholder="E-posta">
+      <input type="password" id="loginPass" placeholder="Şifre">
+      ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
+      <button class="btn btn-primary" onclick="cqApp.doLogin()">Giriş Yap</button>
+    </div>
+  `;
 }
 
 function homeView(){
@@ -643,7 +687,7 @@ function hostSetupView(){
       );
 
   return `
-    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div>
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
     <div class="eyebrow">Oturum Oluştur</div>
     <h2>Soruları hazırla</h2>
     ${templatesSection}
@@ -807,7 +851,8 @@ function escapeHtml(str){
 window.cqApp = {
   startHostSetup, addDraftQuestion, removeDraftQuestion, launchSession,
   revealCurrent, nextQuestion, startJoinFlow, joinSession, submitAnswer,
-  leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate
+  leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
+  doLogin, doLogout
 };
 
 render();
