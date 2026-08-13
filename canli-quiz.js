@@ -180,6 +180,11 @@ const firebaseConfig = {
 const fbApp = firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
+// Oturum oluşturma şifresi — sadece bunu bilen kişi oturum açabilir.
+// Değiştirmek için tırnak içindeki metni kendi şifrenle değiştir.
+const HOST_PASSWORD = "DEGISTIR123";
+const QUESTION_SECONDS = 15;
+
 const SHAPES = [
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#14102B"><path d="M12 3l9 18H3z"/></svg>',
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#14102B"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>',
@@ -219,6 +224,20 @@ function stopListeners(){
   if(state.unsubAnswers){ state.unsubAnswers(); state.unsubAnswers = null; }
 }
 
+// Sorunun kalan süresini (saniye) hesaplar
+function remainingSeconds(){
+  if(!state.quiz || !state.quiz.questionStartedAt) return QUESTION_SECONDS;
+  const elapsed = (Date.now() - state.quiz.questionStartedAt) / 1000;
+  return Math.max(0, Math.ceil(QUESTION_SECONDS - elapsed));
+}
+
+// Süre görünür kalsın diye saniyede bir ekranı tazeler
+setInterval(function(){
+  if((state.view === 'host-live' || state.view === 'participant-live') && state.quiz && !state.quiz.revealed){
+    render();
+  }
+}, 1000);
+
 function goHome(){
   stopListeners();
   state = { ...state, view:'home', errorMsg:'' };
@@ -226,6 +245,11 @@ function goHome(){
 }
 
 async function startHostSetup(){
+  const pass = prompt('Oturum oluşturmak için şifre gir:');
+  if(pass !== HOST_PASSWORD){
+    if(pass !== null) alert('Şifre yanlış.');
+    return;
+  }
   state.view = 'host-setup';
   if(state.draftQuestions.length === 0){
     state.draftQuestions = [
@@ -315,7 +339,7 @@ async function launchSession(){
     return;
   }
   const code = genCode();
-  const quiz = { questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false, questionStartedAt: Date.now() };
+  const quiz = { questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false, questionStartedAt: Date.now(), revealedLeaderboard: null };
   try{
     await db.collection('quizzes').doc(code).set(quiz);
   }catch(e){
@@ -350,6 +374,11 @@ function subscribeHostAnswers(){
 
 async function revealCurrent(){
   state.quiz.revealed = true;
+  try{
+    state.quiz.revealedLeaderboard = await buildLeaderboard(state.code);
+  }catch(e){
+    state.quiz.revealedLeaderboard = [];
+  }
   await db.collection('quizzes').doc(state.code).set(state.quiz);
   render();
 }
@@ -367,20 +396,38 @@ async function nextQuestion(){
   }
   state.quiz.currentIndex += 1;
   state.quiz.revealed = false;
+  state.quiz.revealedLeaderboard = null;
   state.quiz.questionStartedAt = Date.now();
   await db.collection('quizzes').doc(state.code).set(state.quiz);
   render();
   subscribeHostAnswers();
 }
 
+// Katılan herkesi (cevap vermemiş olsa bile) puanlarıyla birlikte sıralı getirir
+async function buildLeaderboard(code){
+  const [partSnap, scoreSnap] = await Promise.all([
+    db.collection('quizzes').doc(code).collection('participants').get(),
+    db.collection('quizzes').doc(code).collection('scores').get()
+  ]);
+  const scoreMap = {};
+  scoreSnap.forEach(d => { scoreMap[d.id] = d.data(); });
+  const rows = [];
+  partSnap.forEach(d => {
+    const sd = scoreMap[d.id] || {};
+    rows.push({
+      name: d.data().name,
+      score: sd.score || 0,
+      correctCount: sd.correctCount || 0,
+      answeredCount: sd.answeredCount || 0
+    });
+  });
+  rows.sort((a,b) => b.score - a.score);
+  return rows;
+}
+
 async function loadLeaderboard(){
   try{
-    const scoresRef = db.collection('quizzes').doc(state.code).collection('scores');
-    const snap = await scoresRef.get();
-    const rows = [];
-    snap.forEach(d => rows.push(d.data()));
-    rows.sort((a,b)=> b.score - a.score);
-    state.leaderboard = rows;
+    state.leaderboard = await buildLeaderboard(state.code);
   }catch(e){
     state.leaderboard = [];
   }
@@ -431,6 +478,11 @@ async function joinSession(){
     storeParticipantId(code, pid);
   }
   state.participantId = pid;
+
+  // Katılımcılar listesine ekle/güncelle (puan almasa bile sonuç listesinde görünsün diye)
+  try{
+    await db.collection('quizzes').doc(code).collection('participants').doc(pid).set({ name });
+  }catch(e){}
 
   // Önceki skoru geri yükle (varsa)
   state.myScore = 0;
@@ -493,13 +545,14 @@ function subscribeParticipant(){
 
 async function submitAnswer(idx){
   if(state.answeredThisQ) return;
+  if(remainingSeconds() <= 0) return;
   const qIndex = state.quiz.currentIndex;
   const question = state.quiz.questions[qIndex];
   const isCorrect = idx === question.correct;
   const startedAt = state.quiz.questionStartedAt || Date.now();
   const elapsedSec = Math.max(0, (Date.now() - startedAt) / 1000);
-  // Kahoot tarzı: doğru cevap hızlıysa daha yüksek puan (max 1000, 20 sn sonra taban 200'e iner)
-  const points = isCorrect ? Math.round(Math.max(200, 1000 - elapsedSec * 40)) : 0;
+  // Kahoot tarzı: doğru cevap hızlıysa daha yüksek puan (max 1000, süre sonunda taban 100'e iner)
+  const points = isCorrect ? Math.round(Math.max(100, 1000 - (elapsedSec / QUESTION_SECONDS) * 900)) : 0;
   state.answeredThisQ = true;
   state.myAnswerIdx = idx;
   state.myScore += points;
@@ -622,6 +675,7 @@ function hostSetupView(){
 function hostLiveView(){
   const q = state.quiz.questions[state.quiz.currentIndex];
   const total = state.quiz.questions.length;
+  const rem = remainingSeconds();
   const optsHtml = q.options.map((o,i)=>`
     <div class="answer-tile a${i}" style="min-height:auto;padding:12px 14px;cursor:default;">
       ${SHAPES[i]}<span>${escapeHtml(o)}</span>
@@ -636,6 +690,7 @@ function hostLiveView(){
     <div class="status-pill">Kod: ${state.code}</div>
     <div class="code-display">${state.code}</div>
     <p class="code-sub">Katılımcılar bu kodla katılabilir · Soru ${state.quiz.currentIndex+1}/${total}</p>
+    ${!state.quiz.revealed ? `<p style="text-align:center;font-size:28px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:6px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card" style="margin-top:16px;">
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
       <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px;">${optsHtml}</div>
@@ -691,9 +746,11 @@ function participantLiveView(){
   const q = state.quiz.questions[state.quiz.currentIndex];
   const total = state.quiz.questions.length;
   const revealed = state.quiz.revealed;
+  const rem = remainingSeconds();
+  const timeUp = rem <= 0;
 
   const optsHtml = q.options.map((o,i)=>{
-    const disabled = state.answeredThisQ || revealed;
+    const disabled = state.answeredThisQ || revealed || timeUp;
     let extraClass = '';
     if(revealed && i === q.correct) extraClass = 'correct-flash';
     return `<button class="answer-tile a${i} ${extraClass}" ${disabled?'disabled':''} onclick="cqApp.submitAnswer(${i})">${SHAPES[i]}<span>${escapeHtml(o)}</span></button>`;
@@ -707,6 +764,22 @@ function participantLiveView(){
     banner = `<div class="result-banner result-wrong">Cevap vermedin</div>`;
   } else if(state.answeredThisQ){
     banner = `<p style="text-align:center;margin-top:14px;">Cevabın kaydedildi. Sunucunun sonucu göstermesi bekleniyor…</p>`;
+  } else if(timeUp){
+    banner = `<p style="text-align:center;margin-top:14px;">Süre doldu. Sonucun açıklanması bekleniyor…</p>`;
+  }
+
+  let leaderboardHtml = '';
+  if(revealed && state.quiz.revealedLeaderboard && state.quiz.revealedLeaderboard.length){
+    const rows = state.quiz.revealedLeaderboard.map((r,i)=>{
+      const isMe = r.name === state.name && i === state.quiz.revealedLeaderboard.findIndex(x=>x.name===state.name);
+      return `
+      <div class="leaderboard-row" style="${isMe ? 'outline:2px solid var(--lime);' : ''}">
+        <span class="rank">${i+1}</span>
+        <span class="nm">${escapeHtml(r.name)}</span>
+        <span class="sc">${r.score} p</span>
+      </div>`;
+    }).join('');
+    leaderboardHtml = `<div class="card"><h3 style="font-size:15px;">Puan Durumu</h3>${rows}</div>`;
   }
 
   return `
@@ -715,11 +788,13 @@ function participantLiveView(){
       <span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)} · Puan: ${state.myScore}</span>
     </div>
     <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
+    ${!revealed ? `<p style="text-align:center;font-size:26px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:4px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card">
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
       <div class="answer-grid">${optsHtml}</div>
       ${banner}
     </div>
+    ${leaderboardHtml}
   `;
 }
 
