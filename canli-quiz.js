@@ -1041,13 +1041,15 @@ function hostLiveView(){
 
 function hostResultsView(){
   const title = state.quiz ? (state.quiz.title || ('Oturum ' + state.code)) : 'Sonuçlar';
+  const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
   const rows = (state.leaderboard || []).map((r,i)=>{
     const c = r.correctCount || 0;
     const wrong = Math.max(0, (r.answeredCount||0) - c);
+    const blank = Math.max(0, total - (r.answeredCount||0));
     return `
     <div class="leaderboard-row">
       <span class="rank">${i+1}</span>
-      <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış</span></span>
+      <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
       <span class="sc">${r.score} p</span>
     </div>
   `;}).join('');
@@ -1148,12 +1150,16 @@ function participantLiveView(){
 
   let leaderboardHtml = '';
   if(revealed && state.quiz.revealedLeaderboard && state.quiz.revealedLeaderboard.length){
+    const askedSoFar = state.quiz.currentIndex + 1;
     const rows = state.quiz.revealedLeaderboard.map((r,i)=>{
       const isMe = r.name === state.name && i === state.quiz.revealedLeaderboard.findIndex(x=>x.name===state.name);
+      const c = r.correctCount || 0;
+      const wrong = Math.max(0, (r.answeredCount||0) - c);
+      const blank = Math.max(0, askedSoFar - (r.answeredCount||0));
       return `
       <div class="leaderboard-row" style="${isMe ? 'outline:2px solid var(--lime);' : ''}">
         <span class="rank">${i+1}</span>
-        <span class="nm">${escapeHtml(r.name)}</span>
+        <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
         <span class="sc">${r.score} p</span>
       </div>`;
     }).join('');
@@ -1165,6 +1171,7 @@ function participantLiveView(){
       <button class="muted-link" onclick="if(confirm('Oturumdan ayrılınsın mı?')) cqApp.leaveSession();">← Ayrıl</button>
       <span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)} · Puan: ${state.myScore}</span>
     </div>
+    <div class="eyebrow" style="text-align:center;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</div>
     <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
     ${!revealed ? `<p style="text-align:center;font-size:26px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:4px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card">
