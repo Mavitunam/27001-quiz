@@ -199,6 +199,7 @@ let state = {
   name: '',
   quiz: null,
   draftQuestions: [],
+  draftTitle: '',
   editingIndex: null,
   participantId: null,
   answeredThisQ: false,
@@ -216,7 +217,8 @@ let state = {
   participantsList: [],
   answeredPids: null,
   mySessions: null,
-  pendingAfterLogin: 'setup'
+  pendingAfterLogin: 'setup',
+  detailReport: null
 };
 
 function render(){
@@ -225,6 +227,16 @@ function render(){
 
 function genCode(){ return String(Math.floor(1000 + Math.random()*9000)); }
 function genId(){ return 'p' + Math.random().toString(36).slice(2,10); }
+
+function fmtDate(ts){
+  if(!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleDateString('tr-TR') + ' ' + d.toLocaleTimeString('tr-TR', {hour:'2-digit', minute:'2-digit'});
+}
+
+function setDraftTitle(v){
+  state.draftTitle = v;
+}
 
 function stopListeners(){
   if(state.unsubQuiz){ state.unsubQuiz(); state.unsubQuiz = null; }
@@ -345,14 +357,74 @@ async function manageSession(code){
 
 async function manageResults(code){
   try{
-    const leaderboard = await buildLeaderboard(code);
+    const [leaderboard, quizSnap] = await Promise.all([
+      buildLeaderboard(code),
+      db.collection('quizzes').doc(code).get()
+    ]);
     state.leaderboard = leaderboard;
     state.code = code;
+    state.quiz = quizSnap.exists ? quizSnap.data() : null;
     state.view = 'host-results';
     render();
   }catch(e){
     alert('Sonuçlar yüklenemedi.');
   }
+}
+
+async function renameSession(code){
+  const s = (state.mySessions||[]).find(x => x.code === code);
+  const current = s ? s.title : '';
+  const newTitle = prompt('Yeni oturum adı:', current || '');
+  if(newTitle === null || !newTitle.trim()) return;
+  try{
+    await db.collection('quizzes').doc(code).update({ title: newTitle.trim() });
+    if(s) s.title = newTitle.trim();
+    render();
+  }catch(e){
+    alert('İsim değiştirilemedi, tekrar dener misin?');
+  }
+}
+
+async function deleteSession(code){
+  if(!confirm('Bu oturum ve tüm cevapları kalıcı olarak silinecek. Emin misin?')) return;
+  try{
+    const subcols = ['answers', 'scores', 'participants'];
+    for(const sub of subcols){
+      const snap = await db.collection('quizzes').doc(code).collection(sub).get();
+      await Promise.all(snap.docs.map(d => d.ref.delete()));
+    }
+    await db.collection('quizzes').doc(code).delete();
+    state.mySessions = (state.mySessions||[]).filter(s => s.code !== code);
+    render();
+  }catch(e){
+    alert('Silinemedi, tekrar dener misin?');
+  }
+}
+
+async function openDetailReport(code){
+  state.view = 'manage-detail';
+  state.detailReport = null;
+  render();
+  try{
+    const [quizSnap, ansSnap, partSnap] = await Promise.all([
+      db.collection('quizzes').doc(code).get(),
+      db.collection('quizzes').doc(code).collection('answers').get(),
+      db.collection('quizzes').doc(code).collection('participants').get()
+    ]);
+    const quiz = quizSnap.exists ? quizSnap.data() : { questions: [] };
+    const participants = {};
+    partSnap.forEach(d => { participants[d.id] = d.data().name; });
+    const answersByParticipant = {};
+    ansSnap.forEach(d => {
+      const a = d.data();
+      if(!answersByParticipant[a.participantId]) answersByParticipant[a.participantId] = {};
+      answersByParticipant[a.participantId][a.qIndex] = a;
+    });
+    state.detailReport = { code, quiz, participants, answersByParticipant };
+  }catch(e){
+    state.detailReport = { code, quiz: { questions: [] }, participants: {}, answersByParticipant: {}, error: true };
+  }
+  render();
 }
 
 async function loadTemplates(){
@@ -392,6 +464,7 @@ function useTemplate(id){
   const t = state.templates.find(t => t.id === id);
   if(!t) return;
   state.draftQuestions = JSON.parse(JSON.stringify(t.questions));
+  if(!state.draftTitle) state.draftTitle = t.title;
   state.errorMsg = '';
   render();
 }
@@ -451,8 +524,9 @@ async function launchSession(){
     return;
   }
   const code = genCode();
+  const title = (state.draftTitle || '').trim() || ('Oturum ' + code);
   const quiz = {
-    questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false,
+    title, questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false,
     started: false, questionStartedAt: null, revealedLeaderboard: null,
     createdBy: auth.currentUser ? auth.currentUser.uid : null, createdAt: Date.now()
   };
@@ -469,6 +543,7 @@ async function launchSession(){
   state.errorMsg = '';
   state.answerCount = 0;
   state.correctCount = 0;
+  state.draftTitle = '';
   render();
   subscribeHostAnswers();
   subscribeHostParticipants();
@@ -729,12 +804,13 @@ async function submitAnswer(idx){
 function leaveSession(){
   stopListeners();
   state = {
-    view:'home', code:'', name:'', quiz:null, draftQuestions:[], editingIndex:null,
+    view:'home', code:'', name:'', quiz:null, draftQuestions:[], draftTitle:'', editingIndex:null,
     participantId:null, answeredThisQ:false, myAnswerIdx:null, myScore:0,
     myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
     unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
-    unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAfterLogin:'setup'
+    unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAfterLogin:'setup',
+    detailReport:null
   };
   render();
 }
@@ -749,6 +825,7 @@ function viewFor(view){
     case 'join': return joinView();
     case 'participant-live': return participantLiveView();
     case 'manage': return manageView();
+    case 'manage-detail': return manageDetailView();
     default: return homeView();
   }
 }
@@ -798,14 +875,22 @@ function manageView(){
     const statusColor = s.ended ? 'var(--text-dim)' : (s.started ? 'var(--lime)' : 'var(--gold)');
     return `
     <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
-      <div class="row" style="margin-bottom:6px;">
-        <span style="font-family:var(--font-display);font-weight:700;color:var(--lime);">${s.code}</span>
+      <div class="row" style="margin-bottom:2px;">
+        <span style="font-family:var(--font-display);font-weight:700;">${escapeHtml(s.title || ('Oturum ' + s.code))}</span>
         <span style="font-size:12px;color:${statusColor};">${status}</span>
+      </div>
+      <div class="row" style="margin-bottom:6px;">
+        <span style="font-size:12px;color:var(--lime);">Kod: ${s.code}</span>
+        <span class="dim" style="font-size:11px;">${fmtDate(s.createdAt)}</span>
       </div>
       <p class="dim" style="font-size:12px;margin:0 0 8px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</p>
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
         <button class="btn btn-secondary" onclick="cqApp.manageResults('${s.code}')">Sonuç</button>
+      </div>
+      <div class="btn-row" style="margin-top:6px;">
+        <button class="btn btn-secondary" onclick="cqApp.renameSession('${s.code}')">✎ İsim Değiştir</button>
+        <button class="btn btn-secondary" style="color:var(--coral);" onclick="cqApp.deleteSession('${s.code}')">🗑 Sil</button>
       </div>
     </div>`;
   }).join('');
@@ -853,6 +938,9 @@ function hostSetupView(){
     <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
     <div class="eyebrow">Oturum Oluştur</div>
     <h2>Soruları hazırla</h2>
+    <div class="card">
+      <input type="text" id="draftTitle" placeholder="Oturum adı (örn. Yangın Güvenliği Eğitimi)" value="${escapeHtml(state.draftTitle || '')}" oninput="cqApp.setDraftTitle(this.value)">
+    </div>
     ${templatesSection}
     <div class="card">
       <input type="text" id="draftQText" placeholder="Soru metni" value="${editQ ? escapeHtml(editQ.q) : ''}">
@@ -914,6 +1002,7 @@ function hostLiveView(){
     <div class="top-bar">
       <button class="muted-link" onclick="if(confirm('Oturumdan çıkılsın mı?')) cqApp.leaveSession();">← Oturumu kapat</button>
     </div>
+    <h2 style="text-align:center;margin-bottom:2px;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</h2>
     <div class="status-pill">Kod: ${state.code}</div>
     <div class="code-display">${state.code}</div>
     <p class="code-sub">Katılımcılar bu kodla katılabilir · Soru ${state.quiz.currentIndex+1}/${total}</p>
@@ -951,7 +1040,7 @@ function hostLiveView(){
 }
 
 function hostResultsView(){
-  const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
+  const title = state.quiz ? (state.quiz.title || ('Oturum ' + state.code)) : 'Sonuçlar';
   const rows = (state.leaderboard || []).map((r,i)=>{
     const c = r.correctCount || 0;
     const wrong = Math.max(0, (r.answeredCount||0) - c);
@@ -963,13 +1052,41 @@ function hostResultsView(){
     </div>
   `;}).join('');
   return `
-    <div class="eyebrow">Sonuçlar</div>
+    <div class="eyebrow">${escapeHtml(title)}</div>
     <h2>Puan Durumu</h2>
     <div class="card">${rows || '<p>Henüz kimse cevap vermedi.</p>'}</div>
-    <div class="btn-row">
+    <button class="btn btn-secondary" onclick="cqApp.openDetailReport('${state.code}')">📋 Kim Neye Cevap Verdi?</button>
+    <div class="btn-row" style="margin-top:8px;">
       <button class="btn btn-secondary" onclick="cqApp.openManagePanel()">Oturumlarım</button>
       <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
     </div>
+  `;
+}
+
+function manageDetailView(){
+  const r = state.detailReport;
+  if(!r) return `<div class="top-bar"><button class="muted-link" onclick="cqApp.openManagePanel()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
+  const pids = Object.keys(r.participants);
+  const cards = pids.map(pid => {
+    const name = r.participants[pid];
+    const answers = r.answersByParticipant[pid] || {};
+    const qRows = (r.quiz.questions || []).map((q,i) => {
+      const a = answers[i];
+      if(!a){
+        return `<div class="row"><span class="dim">S${i+1}: ${escapeHtml(q.q)}</span><span class="dim">Cevap yok</span></div>`;
+      }
+      const choiceText = q.options && q.options[a.choice] !== undefined ? q.options[a.choice] : '?';
+      const mark = a.correct ? '✓' : '✗';
+      const color = a.correct ? 'var(--lime)' : 'var(--coral)';
+      return `<div class="row"><span class="dim">S${i+1}: ${escapeHtml(q.q)}</span><span style="color:${color};font-size:13px;">${mark} ${escapeHtml(choiceText)} (${a.points||0}p)</span></div>`;
+    }).join('');
+    return `<div class="card"><h3 style="font-size:15px;">${escapeHtml(name)}</h3>${qRows || '<p class="dim">Cevap yok.</p>'}</div>`;
+  }).join('');
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.manageResults('${r.code}')">← Geri</button></div>
+    <div class="eyebrow">Detaylı Rapor</div>
+    <h2>${escapeHtml(r.quiz.title || ('Oturum ' + r.code))}</h2>
+    ${pids.length ? cards : '<div class="card"><p class="dim">Kimse katılmadı.</p></div>'}
   `;
 }
 
@@ -1001,6 +1118,7 @@ function participantLiveView(){
         <button class="muted-link" onclick="if(confirm('Oturumdan ayrılınsın mı?')) cqApp.leaveSession();">← Ayrıl</button>
         <span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)}</span>
       </div>
+      <div class="eyebrow" style="text-align:center;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</div>
       <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
       <div class="card" style="text-align:center;">
         <h2 style="font-size:19px;">Hazır ol!</h2>
@@ -1069,7 +1187,8 @@ window.cqApp = {
   revealCurrent, nextQuestion, startJoinFlow, joinSession, submitAnswer,
   leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
   doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
-  startQuestion, openManagePanel, manageSession, manageResults
+  startQuestion, openManagePanel, manageSession, manageResults,
+  setDraftTitle, renameSession, deleteSession, openDetailReport
 };
 
 render();
