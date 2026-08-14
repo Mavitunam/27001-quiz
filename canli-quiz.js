@@ -211,7 +211,12 @@ let state = {
   unsubQuiz: null,
   unsubAnswers: null,
   templates: [],
-  templatesLoaded: false
+  templatesLoaded: false,
+  unsubParticipants: null,
+  participantsList: [],
+  answeredPids: null,
+  mySessions: null,
+  pendingAfterLogin: 'setup'
 };
 
 function render(){
@@ -224,18 +229,19 @@ function genId(){ return 'p' + Math.random().toString(36).slice(2,10); }
 function stopListeners(){
   if(state.unsubQuiz){ state.unsubQuiz(); state.unsubQuiz = null; }
   if(state.unsubAnswers){ state.unsubAnswers(); state.unsubAnswers = null; }
+  if(state.unsubParticipants){ state.unsubParticipants(); state.unsubParticipants = null; }
 }
 
-// Sorunun kalan süresini (saniye) hesaplar
+// Sorunun kalan süresini (saniye) hesaplar — soru başlatılmadıysa null döner
 function remainingSeconds(){
-  if(!state.quiz || !state.quiz.questionStartedAt) return QUESTION_SECONDS;
+  if(!state.quiz || !state.quiz.started || !state.quiz.questionStartedAt) return null;
   const elapsed = (Date.now() - state.quiz.questionStartedAt) / 1000;
   return Math.max(0, Math.ceil(QUESTION_SECONDS - elapsed));
 }
 
 // Süre görünür kalsın diye saniyede bir ekranı tazeler
 setInterval(function(){
-  if((state.view === 'host-live' || state.view === 'participant-live') && state.quiz && !state.quiz.revealed){
+  if((state.view === 'host-live' || state.view === 'participant-live') && state.quiz && state.quiz.started && !state.quiz.revealed){
     render();
   }
 }, 1000);
@@ -247,8 +253,20 @@ function goHome(){
 }
 
 async function startHostSetup(){
+  state.pendingAfterLogin = 'setup';
   if(auth.currentUser){
     await enterSetup();
+    return;
+  }
+  state.view = 'login';
+  state.errorMsg = '';
+  render();
+}
+
+async function openManagePanel(){
+  state.pendingAfterLogin = 'manage';
+  if(auth.currentUser){
+    await enterManage();
     return;
   }
   state.view = 'login';
@@ -267,7 +285,8 @@ async function doLogin(){
   try{
     await auth.signInWithEmailAndPassword(email, pw);
     state.errorMsg = '';
-    await enterSetup();
+    if(state.pendingAfterLogin === 'manage') await enterManage();
+    else await enterSetup();
   }catch(e){
     state.errorMsg = 'E-posta veya şifre hatalı.';
     render();
@@ -290,6 +309,50 @@ async function enterSetup(){
   render();
   await loadTemplates();
   render();
+}
+
+async function enterManage(){
+  stopListeners();
+  state.view = 'manage';
+  state.mySessions = null;
+  render();
+  try{
+    const snap = await db.collection('quizzes').where('createdBy', '==', auth.currentUser.uid).get();
+    const rows = [];
+    snap.forEach(d => rows.push({ code: d.id, ...d.data() }));
+    rows.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    state.mySessions = rows;
+  }catch(e){
+    state.mySessions = [];
+  }
+  render();
+}
+
+async function manageSession(code){
+  try{
+    const snap = await db.collection('quizzes').doc(code).get();
+    if(!snap.exists){ alert('Oturum bulunamadı.'); return; }
+    state.code = code;
+    state.quiz = snap.data();
+    state.view = 'host-live';
+    render();
+    subscribeHostAnswers();
+    subscribeHostParticipants();
+  }catch(e){
+    alert('Oturum açılamadı, tekrar dener misin?');
+  }
+}
+
+async function manageResults(code){
+  try{
+    const leaderboard = await buildLeaderboard(code);
+    state.leaderboard = leaderboard;
+    state.code = code;
+    state.view = 'host-results';
+    render();
+  }catch(e){
+    alert('Sonuçlar yüklenemedi.');
+  }
 }
 
 async function loadTemplates(){
@@ -388,7 +451,11 @@ async function launchSession(){
     return;
   }
   const code = genCode();
-  const quiz = { questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false, questionStartedAt: Date.now(), revealedLeaderboard: null };
+  const quiz = {
+    questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false,
+    started: false, questionStartedAt: null, revealedLeaderboard: null,
+    createdBy: auth.currentUser ? auth.currentUser.uid : null, createdAt: Date.now()
+  };
   try{
     await db.collection('quizzes').doc(code).set(quiz);
   }catch(e){
@@ -404,6 +471,7 @@ async function launchSession(){
   state.correctCount = 0;
   render();
   subscribeHostAnswers();
+  subscribeHostParticipants();
 }
 
 function subscribeHostAnswers(){
@@ -412,13 +480,35 @@ function subscribeHostAnswers(){
   const answersRef = db.collection('quizzes').doc(state.code).collection('answers');
   state.unsubAnswers = answersRef.where('qIndex', '==', qIndex).onSnapshot((snap) => {
     let count = 0, correct = 0;
-    snap.forEach(d => { count++; if(d.data().correct) correct++; });
+    const pids = {};
+    snap.forEach(d => { count++; if(d.data().correct) correct++; pids[d.data().participantId] = true; });
     state.answerCount = count;
     state.correctCount = correct;
+    state.answeredPids = pids;
     if(state.view === 'host-live') render();
   }, (err) => {
     console.error('answers listener error', err);
   });
+}
+
+function subscribeHostParticipants(){
+  if(state.unsubParticipants) state.unsubParticipants();
+  state.unsubParticipants = db.collection('quizzes').doc(state.code).collection('participants')
+    .onSnapshot((snap) => {
+      const list = [];
+      snap.forEach(d => list.push({ id: d.id, name: d.data().name }));
+      state.participantsList = list;
+      if(state.view === 'host-live') render();
+    }, (err) => {
+      console.error('participants listener error', err);
+    });
+}
+
+async function startQuestion(){
+  state.quiz.started = true;
+  state.quiz.questionStartedAt = Date.now();
+  await db.collection('quizzes').doc(state.code).set(state.quiz);
+  render();
 }
 
 async function revealCurrent(){
@@ -446,7 +536,8 @@ async function nextQuestion(){
   state.quiz.currentIndex += 1;
   state.quiz.revealed = false;
   state.quiz.revealedLeaderboard = null;
-  state.quiz.questionStartedAt = Date.now();
+  state.quiz.started = false;
+  state.quiz.questionStartedAt = null;
   await db.collection('quizzes').doc(state.code).set(state.quiz);
   render();
   subscribeHostAnswers();
@@ -594,7 +685,9 @@ function subscribeParticipant(){
 
 async function submitAnswer(idx){
   if(state.answeredThisQ) return;
-  if(remainingSeconds() <= 0) return;
+  if(!state.quiz.started) return;
+  const rem = remainingSeconds();
+  if(rem === null || rem <= 0) return;
   const qIndex = state.quiz.currentIndex;
   const question = state.quiz.questions[qIndex];
   const isCorrect = idx === question.correct;
@@ -629,7 +722,8 @@ function leaveSession(){
     participantId:null, answeredThisQ:false, myAnswerIdx:null, myScore:0,
     myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
-    unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false
+    unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
+    unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAfterLogin:'setup'
   };
   render();
 }
@@ -643,6 +737,7 @@ function viewFor(view){
     case 'host-results': return hostResultsView();
     case 'join': return joinView();
     case 'participant-live': return participantLiveView();
+    case 'manage': return manageView();
     default: return homeView();
   }
 }
@@ -678,6 +773,39 @@ function homeView(){
         <p style="font-size:13px;margin-top:4px;">Katılımcı</p>
       </div>
     </div>
+    <button class="muted-link" style="display:block;margin:14px auto 0;" onclick="cqApp.openManagePanel()">📋 Oturumlarımı Yönet</button>
+  `;
+}
+
+function manageView(){
+  if(state.mySessions === null){
+    return `<div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
+  }
+  const rows = state.mySessions.map(s => {
+    const total = (s.questions||[]).length;
+    const status = s.ended ? 'Bitti' : (s.started ? 'Devam Ediyor' : 'Lobide Bekliyor');
+    const statusColor = s.ended ? 'var(--text-dim)' : (s.started ? 'var(--lime)' : 'var(--gold)');
+    return `
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row" style="margin-bottom:6px;">
+        <span style="font-family:var(--font-display);font-weight:700;color:var(--lime);">${s.code}</span>
+        <span style="font-size:12px;color:${statusColor};">${status}</span>
+      </div>
+      <p class="dim" style="font-size:12px;margin:0 0 8px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</p>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
+        <button class="btn btn-secondary" onclick="cqApp.manageResults('${s.code}')">Sonuç</button>
+      </div>
+    </div>`;
+  }).join('');
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
+    <div class="eyebrow">Oturumlarım</div>
+    <h2>Oluşturduğun oturumlar</h2>
+    <div class="card">
+      ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturmadın.</p>'}
+    </div>
+    <button class="btn btn-primary" onclick="cqApp.startHostSetup()">+ Yeni Oturum Oluştur</button>
   `;
 }
 
@@ -747,6 +875,23 @@ function hostLiveView(){
   const q = state.quiz.questions[state.quiz.currentIndex];
   const total = state.quiz.questions.length;
   const rem = remainingSeconds();
+  const started = !!state.quiz.started;
+  const pList = state.participantsList || [];
+  const answeredSet = state.answeredPids || {};
+
+  const partRows = pList.map(p => `
+    <div class="row">
+      <span>${escapeHtml(p.name)}</span>
+      <span style="font-size:12px;color:${answeredSet[p.id] ? 'var(--lime)' : 'var(--text-dim)'};">${answeredSet[p.id] ? '✓ Cevapladı' : '⏳ Bekleniyor'}</span>
+    </div>
+  `).join('');
+  const participantsCard = `
+    <div class="card">
+      <div class="row"><h3 style="font-size:15px;margin:0;">Katılımcılar</h3><span class="dim" style="font-size:13px;">${pList.length} kişi</span></div>
+      ${pList.length ? partRows : '<p class="dim" style="font-size:13px;">Henüz kimse katılmadı.</p>'}
+    </div>
+  `;
+
   const optsHtml = q.options.map((o,i)=>`
     <div class="answer-tile a${i}" style="min-height:auto;padding:12px 14px;cursor:default;">
       ${SHAPES[i]}<span>${escapeHtml(o)}</span>
@@ -754,22 +899,37 @@ function hostLiveView(){
     </div>
   `).join('');
 
-  return `
+  const header = `
     <div class="top-bar">
       <button class="muted-link" onclick="if(confirm('Oturumdan çıkılsın mı?')) cqApp.leaveSession();">← Oturumu kapat</button>
     </div>
     <div class="status-pill">Kod: ${state.code}</div>
     <div class="code-display">${state.code}</div>
     <p class="code-sub">Katılımcılar bu kodla katılabilir · Soru ${state.quiz.currentIndex+1}/${total}</p>
+  `;
+
+  if(!started){
+    return header + participantsCard + `
+      <div class="card">
+        <h3 style="font-size:15px;">Sıradaki soru (önizleme)</h3>
+        <p style="color:var(--text-dim);">${escapeHtml(q.q)}</p>
+      </div>
+      <button class="btn btn-primary" onclick="cqApp.startQuestion()">▶ Soruyu Başlat</button>
+      <p class="dim" style="text-align:center;font-size:12px;margin-top:8px;">Herkes katılana kadar bekleyebilirsin, süre bu butona basınca başlar.</p>
+    `;
+  }
+
+  return header + `
     ${!state.quiz.revealed ? `<p style="text-align:center;font-size:28px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:6px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card" style="margin-top:16px;">
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
       <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px;">${optsHtml}</div>
       <div class="stat-row">
-        <span>${state.answerCount} kişi cevapladı</span>
+        <span>${state.answerCount}/${pList.length} kişi cevapladı</span>
         <span>${state.quiz.revealed ? state.correctCount + ' doğru' : ''}</span>
       </div>
     </div>
+    ${participantsCard}
     <div class="btn-row">
       ${!state.quiz.revealed
         ? `<button class="btn btn-gold" onclick="cqApp.revealCurrent()">Cevabı Göster</button>`
@@ -792,10 +952,13 @@ function hostResultsView(){
     </div>
   `;}).join('');
   return `
-    <div class="eyebrow">Oturum Bitti</div>
-    <h2>Sonuçlar</h2>
+    <div class="eyebrow">Sonuçlar</div>
+    <h2>Puan Durumu</h2>
     <div class="card">${rows || '<p>Henüz kimse cevap vermedi.</p>'}</div>
-    <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfaya Dön</button>
+    <div class="btn-row">
+      <button class="btn btn-secondary" onclick="cqApp.openManagePanel()">Oturumlarım</button>
+      <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
+    </div>
   `;
 }
 
@@ -817,8 +980,23 @@ function participantLiveView(){
   const q = state.quiz.questions[state.quiz.currentIndex];
   const total = state.quiz.questions.length;
   const revealed = state.quiz.revealed;
+  const started = !!state.quiz.started;
   const rem = remainingSeconds();
-  const timeUp = rem <= 0;
+  const timeUp = started && (rem === null || rem <= 0);
+
+  if(!started){
+    return `
+      <div class="top-bar">
+        <button class="muted-link" onclick="if(confirm('Oturumdan ayrılınsın mı?')) cqApp.leaveSession();">← Ayrıl</button>
+        <span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)}</span>
+      </div>
+      <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
+      <div class="card" style="text-align:center;">
+        <h2 style="font-size:19px;">Hazır ol!</h2>
+        <p class="dim">Yönetici soruyu başlattığında otomatik olarak açılacak.</p>
+      </div>
+    `;
+  }
 
   const optsHtml = q.options.map((o,i)=>{
     const disabled = state.answeredThisQ || revealed || timeUp;
@@ -879,7 +1057,8 @@ window.cqApp = {
   startHostSetup, addDraftQuestion, removeDraftQuestion, launchSession,
   revealCurrent, nextQuestion, startJoinFlow, joinSession, submitAnswer,
   leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
-  doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion
+  doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
+  startQuestion, openManagePanel, manageSession, manageResults
 };
 
 render();
