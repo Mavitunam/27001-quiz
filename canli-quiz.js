@@ -609,7 +609,6 @@ async function joinSession(){
   }
   state.quiz = quizSnap.data();
   state.code = code;
-  state.name = name;
 
   // Aynı cihazdan daha önce bu koda katılmışsa aynı kimliği kullan
   let pid = getStoredParticipantId(code);
@@ -619,10 +618,22 @@ async function joinSession(){
   }
   state.participantId = pid;
 
-  // Katılımcılar listesine ekle/güncelle (puan almasa bile sonuç listesinde görünsün diye)
+  // İsim kilidi: bu kimlik için daha önce bir isim kaydedildiyse, o isim korunur —
+  // yeni yazılan isim yok sayılır (sonuçları manipüle etmeyi engeller).
+  let finalName = name;
   try{
-    await db.collection('quizzes').doc(code).collection('participants').doc(pid).set({ name });
+    const existingPart = await db.collection('quizzes').doc(code).collection('participants').doc(pid).get();
+    if(existingPart.exists && existingPart.data().name){
+      finalName = existingPart.data().name;
+      if(finalName !== name){
+        state.errorMsg = '';
+        alert('Bu oturuma daha önce "' + finalName + '" adıyla katılmışsın, o isimle devam ediyorsun.');
+      }
+    } else {
+      await db.collection('quizzes').doc(code).collection('participants').doc(pid).set({ name: finalName });
+    }
   }catch(e){}
+  state.name = finalName;
 
   // Önceki skoru geri yükle (varsa)
   state.myScore = 0;
