@@ -970,8 +970,8 @@ function loginView(){
 function homeView(){
   return `
     <div class="eyebrow">Canlı Quiz</div>
-    <h1>Herkes aynı anda oynasın</h1>
-    <p>Bir oturum oluştur ya da elindeki kodla bir oturuma katıl. Hesap gerekmez.</p>
+    <h1>Eğitimleri Yarışmaya Dönüştürün!</h1>
+    <p>Canlı sorular, anlık sonuçlar ve eğlenceli bilgi yarışmalarıyla katılımı artırın.</p>
     <div class="role-grid" style="margin-top:20px;">
       <div class="role-card" onclick="cqApp.startHostSetup()">
         <span class="icon">🎛️</span>
