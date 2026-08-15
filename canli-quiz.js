@@ -622,7 +622,7 @@ function subscribeHostParticipants(){
       const list = [];
       snap.forEach(d => list.push({ id: d.id, name: d.data().name }));
       state.participantsList = list;
-      if(state.view === 'host-live') render();
+      if(state.view === 'host-live' || state.view === 'participant-live') render();
     }, (err) => {
       console.error('participants listener error', err);
     });
@@ -791,6 +791,7 @@ async function joinSession(){
   state.view = 'participant-live';
   render();
   subscribeParticipant();
+  subscribeHostParticipants();
 }
 
 function subscribeParticipant(){
@@ -1168,6 +1169,10 @@ function participantLiveView(){
   const timeUp = started && (rem === null || rem <= 0);
 
   if(!started){
+    const pList = state.participantsList || [];
+    const partRows = pList.map(p => `
+      <div class="row"><span>${escapeHtml(p.name)}${p.name === state.name ? ' <span class="dim">(sen)</span>' : ''}</span></div>
+    `).join('');
     return `
       <div class="top-bar">
         <button class="muted-link" onclick="if(confirm('Oturumdan ayrılınsın mı?')) cqApp.leaveSession();">← Ayrıl</button>
@@ -1178,6 +1183,10 @@ function participantLiveView(){
       <div class="card" style="text-align:center;">
         <h2 style="font-size:19px;">Hazır ol!</h2>
         <p class="dim">Yönetici soruyu başlattığında otomatik olarak açılacak.</p>
+      </div>
+      <div class="card">
+        <div class="row"><h3 style="font-size:15px;margin:0;">Katılımcılar</h3><span class="dim" style="font-size:13px;">${pList.length} kişi</span></div>
+        ${pList.length ? partRows : '<p class="dim" style="font-size:13px;">Henüz kimse katılmadı.</p>'}
       </div>
     `;
   }
@@ -1225,7 +1234,7 @@ function participantLiveView(){
       <span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)} · Puan: ${state.myScore}</span>
     </div>
     <div class="eyebrow" style="text-align:center;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</div>
-    <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
+    <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total} · ${(state.participantsList||[]).length} kişi</div>
     ${!revealed ? `<p style="text-align:center;font-size:26px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:4px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card">
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
