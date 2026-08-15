@@ -154,12 +154,17 @@
     });
   }
 
+  // QR kütüphanesi ayrı yükleniyor — başarısız olursa quiz'in kendisi etkilenmesin,
+  // sadece QR görüntüsü yerine yedek link gösterilir.
+  loadScript('https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js').catch(function(err){
+    console.error('QR kütüphanesi yüklenemedi', err);
+  });
+
   loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js')
     .then(function(){
       return Promise.all([
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js')
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js')
       ]);
     })
     .then(function(){
@@ -196,7 +201,13 @@ const SHAPES = [
 
 let urlCode = '';
 try{
-  urlCode = new URLSearchParams(window.location.search).get('code') || '';
+  // Hem eski (?code=) hem yeni (#code=) formatı destekle
+  var hashMatch = window.location.hash.match(/code=([0-9]+)/);
+  if(hashMatch){
+    urlCode = hashMatch[1];
+  } else {
+    urlCode = new URLSearchParams(window.location.search).get('code') || '';
+  }
 }catch(e){}
 
 let state = {
@@ -230,7 +241,7 @@ let state = {
 
 function render(){
   document.getElementById('cq-app').innerHTML = viewFor(state.view);
-  if(state.view === 'host-live' && state.quiz && window.QRCode){
+  if(state.view === 'host-live' && state.quiz){
     renderJoinQR();
   }
 }
@@ -239,7 +250,7 @@ function genCode(){ return String(Math.floor(1000 + Math.random()*9000)); }
 function genId(){ return 'p' + Math.random().toString(36).slice(2,10); }
 
 function joinUrlFor(code){
-  return window.location.origin + window.location.pathname + '?code=' + code;
+  return window.location.origin + window.location.pathname + '#code=' + code;
 }
 
 function renderJoinQR(){
