@@ -1136,7 +1136,9 @@ function hostLiveView(){
   `;
 
   if(!started){
-    return header + participantsCard + `
+    return header + `
+      <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
+    ` + participantsCard + `
       <div class="card">
         <h3 style="font-size:15px;">Sıradaki soru (önizleme)</h3>
         <p style="color:var(--text-dim);">${escapeHtml(q.q)}</p>
@@ -1147,8 +1149,9 @@ function hostLiveView(){
   }
 
   return header + `
-    ${!state.quiz.revealed ? `<p style="text-align:center;font-size:28px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:6px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card" style="margin-top:16px;">
+      <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
+      ${!state.quiz.revealed ? `<p style="text-align:center;font-size:28px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:6px 0;">⏱ ${rem}s</p>` : ''}
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
       <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px;">${optsHtml}</div>
       <div class="stat-row">
