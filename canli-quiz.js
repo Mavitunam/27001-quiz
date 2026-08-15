@@ -159,7 +159,7 @@
       return Promise.all([
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js')
+        loadScript('https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js')
       ]);
     })
     .then(function(){
@@ -243,13 +243,27 @@ function joinUrlFor(code){
 }
 
 function renderJoinQR(){
-  const canvas = document.getElementById('cq-qr-canvas');
-  if(!canvas || !window.QRCode) return;
-  if(canvas.dataset.code === state.code) return;
-  window.QRCode.toCanvas(canvas, joinUrlFor(state.code), { width: 168, margin: 1 }, function(err){
-    if(!err) canvas.dataset.code = state.code;
-    else console.error('QR oluşturulamadı', err);
-  });
+  const el = document.getElementById('cq-qr-canvas');
+  if(!el) return;
+  if(el.dataset.code === state.code) return;
+  const url = joinUrlFor(state.code);
+  if(!window.QRCode){
+    el.innerHTML = `<a href="${url}" target="_blank" style="font-size:12px;color:#140F2B;word-break:break-all;">${url}</a>`;
+    return;
+  }
+  el.innerHTML = '';
+  try{
+    new window.QRCode(el, {
+      text: url,
+      width: 168,
+      height: 168,
+      correctLevel: window.QRCode.CorrectLevel.M
+    });
+    el.dataset.code = state.code;
+  }catch(e){
+    console.error('QR oluşturulamadı', e);
+    el.innerHTML = `<a href="${url}" target="_blank" style="font-size:12px;color:#140F2B;word-break:break-all;">${url}</a>`;
+  }
 }
 
 function fmtDate(ts){
@@ -1031,7 +1045,7 @@ function hostLiveView(){
     <div class="code-display">${state.code}</div>
     <p class="code-sub">Katılımcılar bu kodla katılabilir · Soru ${state.quiz.currentIndex+1}/${total}</p>
     <div class="card" style="text-align:center;">
-      <canvas id="cq-qr-canvas" width="168" height="168" style="background:#fff;border-radius:8px;padding:8px;"></canvas>
+      <div id="cq-qr-canvas" style="display:inline-block;background:#fff;border-radius:8px;padding:8px;min-height:168px;min-width:168px;"></div>
       <p class="dim" style="font-size:12px;margin-top:8px;">Kamerayla okutarak katılabilirler</p>
     </div>
   `;
