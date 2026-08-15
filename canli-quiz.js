@@ -38,7 +38,7 @@
   padding:24px 16px 60px;
 }
 #canli-quiz-widget #cq-app{width:100%;max-width:560px;}
-#canli-quiz-widget h1,#canli-quiz-widget h2,#canli-quiz-widget h3{font-family:var(--font-display);margin:0 0 6px;overflow-wrap:break-word;word-break:break-word;}
+#canli-quiz-widget h1,#canli-quiz-widget h2,#canli-quiz-widget h3{font-family:var(--font-display);margin:0 0 6px;overflow-wrap:break-word;}
 #canli-quiz-widget .eyebrow{
   font-family:var(--font-display);font-weight:700;font-size:12px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--lime);margin-bottom:6px;
@@ -95,14 +95,17 @@
 #canli-quiz-widget .qlist-item span{color:var(--text);font-size:14px;}
 #canli-quiz-widget .small-x{background:transparent;border:none;color:var(--coral);font-size:18px;cursor:pointer;font-weight:700;}
 #canli-quiz-widget .answer-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:14px;}
-#canli-quiz-widget .answer-tile{
-  border:none;border-radius:16px;padding:22px 14px;font-family:var(--font-display);
-  font-weight:700;font-size:16px;color:#14102B;cursor:pointer;text-align:left;
-  display:flex;align-items:center;gap:10px;min-height:78px;
-  transition:transform .12s ease, filter .12s ease;
-  width:100%;max-width:100%;min-width:0;overflow-wrap:break-word;word-break:break-word;
+@media (max-width:520px){
+  #canli-quiz-widget .answer-grid{grid-template-columns:minmax(0,1fr);}
 }
-#canli-quiz-widget .answer-tile span{min-width:0;overflow-wrap:break-word;word-break:break-word;}
+#canli-quiz-widget .answer-tile{
+  border:none;border-radius:16px;padding:18px 16px;font-family:var(--font-body);
+  font-weight:600;font-size:16px;line-height:1.35;color:#14102B;cursor:pointer;text-align:left;
+  display:flex;align-items:center;gap:10px;min-height:60px;
+  transition:transform .12s ease, filter .12s ease;
+  width:100%;max-width:100%;min-width:0;overflow-wrap:break-word;
+}
+#canli-quiz-widget .answer-tile span{min-width:0;overflow-wrap:break-word;}
 #canli-quiz-widget .answer-tile:active{transform:scale(0.96);}
 #canli-quiz-widget .answer-tile:disabled{opacity:.55;cursor:default;}
 #canli-quiz-widget .answer-tile.correct-flash{outline:3px solid #fff;}
@@ -781,19 +784,26 @@ async function joinSession(){
 
   // İsim kilidi: bu kimlik için daha önce bir isim kaydedildiyse, o isim korunur —
   // yeni yazılan isim yok sayılır (sonuçları manipüle etmeyi engeller).
+  // Atomik transaction kullanılıyor ki yarış durumunda (aynı anda iki istek) kilit atlanmasın.
   let finalName = name;
+  let nameWasLocked = false;
   try{
-    const existingPart = await db.collection('quizzes').doc(code).collection('participants').doc(pid).get();
-    if(existingPart.exists && existingPart.data().name){
-      finalName = existingPart.data().name;
-      if(finalName !== name){
-        state.errorMsg = '';
-        alert('Bu oturuma daha önce "' + finalName + '" adıyla katılmışsın, o isimle devam ediyorsun.');
+    const partRef = db.collection('quizzes').doc(code).collection('participants').doc(pid);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(partRef);
+      if(snap.exists && snap.data().name){
+        finalName = snap.data().name;
+        if(finalName !== name) nameWasLocked = true;
+      } else {
+        tx.set(partRef, { name: finalName });
       }
-    } else {
-      await db.collection('quizzes').doc(code).collection('participants').doc(pid).set({ name: finalName });
-    }
-  }catch(e){}
+    });
+  }catch(e){
+    console.error('İsim kilidi kontrolü başarısız oldu', e);
+  }
+  if(nameWasLocked){
+    alert('Bu oturuma daha önce "' + finalName + '" adıyla katılmışsın, o isimle devam ediyorsun.');
+  }
   state.name = finalName;
 
   // Önceki skoru geri yükle (varsa)
@@ -1324,6 +1334,7 @@ function participantLiveView(){
     <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total} · ${(state.participantsList||[]).length} kişi</div>
     ${!revealed ? `<p style="text-align:center;font-size:26px;font-weight:800;color:${rem<=5?'var(--coral)':'var(--lime)'};margin:4px 0;">⏱ ${rem}s</p>` : ''}
     <div class="card">
+      <div class="status-pill">Soru ${state.quiz.currentIndex+1} / ${total}</div>
       <h2 style="font-size:19px;">${escapeHtml(q.q)}</h2>
       <div class="answer-grid">${optsHtml}</div>
       ${banner}
