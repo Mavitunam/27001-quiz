@@ -734,6 +734,39 @@ async function joinSession(){
   state.quiz = quizSnap.data();
   state.code = code;
 
+  // Oturum bittiyse: yeni katılıma izin verme. Sadece bu cihazdan daha önce
+  // gerçekten katılmış biri varsa, ona salt okunur sonuç ekranı göster.
+  if(state.quiz.ended){
+    const existingPid = getStoredParticipantId(code);
+    let participated = false;
+    let existingName = '';
+    if(existingPid){
+      try{
+        const partSnap = await db.collection('quizzes').doc(code).collection('participants').doc(existingPid).get();
+        if(partSnap.exists){
+          participated = true;
+          existingName = partSnap.data().name;
+        }
+      }catch(e){}
+    }
+    if(!participated){
+      state.errorMsg = 'Bu oturum sona ermiş. Sadece bu oturuma katılmış olanlar sonuçları görebilir.';
+      render();
+      return;
+    }
+    state.name = existingName;
+    state.participantId = existingPid;
+    try{
+      state.leaderboard = await buildLeaderboard(code);
+    }catch(e){
+      state.leaderboard = [];
+    }
+    state.errorMsg = '';
+    state.view = 'participant-results';
+    render();
+    return;
+  }
+
   // Aynı cihazdan daha önce bu koda katılmışsa aynı kimliği kullan
   let pid = getStoredParticipantId(code);
   if(!pid){
@@ -799,6 +832,18 @@ function subscribeParticipant(){
   state.unsubQuiz = db.collection('quizzes').doc(state.code).onSnapshot(async (snap) => {
     if(!snap.exists) return;
     const fresh = snap.data();
+    if(fresh.ended && state.view === 'participant-live'){
+      stopListeners();
+      state.quiz = fresh;
+      try{
+        state.leaderboard = await buildLeaderboard(state.code);
+      }catch(e){
+        state.leaderboard = [];
+      }
+      state.view = 'participant-results';
+      render();
+      return;
+    }
     if(!state.quiz || fresh.currentIndex !== state.quiz.currentIndex){
       state.answeredThisQ = false;
       state.myAnswerIdx = null;
@@ -876,6 +921,7 @@ function viewFor(view){
     case 'participant-live': return participantLiveView();
     case 'manage': return manageView();
     case 'manage-detail': return manageDetailView();
+    case 'participant-results': return participantResultsView();
     default: return homeView();
   }
 }
@@ -1116,6 +1162,30 @@ function hostResultsView(){
       <button class="btn btn-secondary" onclick="cqApp.openManagePanel()">Oturumlarım</button>
       <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
     </div>
+  `;
+}
+
+function participantResultsView(){
+  const title = state.quiz ? (state.quiz.title || ('Oturum ' + state.code)) : 'Sonuçlar';
+  const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
+  const rows = (state.leaderboard || []).map((r,i)=>{
+    const c = r.correctCount || 0;
+    const wrong = Math.max(0, (r.answeredCount||0) - c);
+    const blank = Math.max(0, total - (r.answeredCount||0));
+    const isMe = r.name === state.name && i === (state.leaderboard||[]).findIndex(x=>x.name===state.name);
+    return `
+    <div class="leaderboard-row" style="${isMe ? 'outline:2px solid var(--lime);' : ''}">
+      <span class="rank">${i+1}</span>
+      <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
+      <span class="sc">${r.score} p</span>
+    </div>
+  `;}).join('');
+  return `
+    <div class="top-bar"><span></span></div>
+    <div class="eyebrow">${escapeHtml(title)}</div>
+    <h2>Oturum Sona Erdi — Sonuçlar</h2>
+    <div class="card">${rows || '<p>Kayıtlı sonuç yok.</p>'}</div>
+    <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
   `;
 }
 
