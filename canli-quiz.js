@@ -158,7 +158,8 @@
     .then(function(){
       return Promise.all([
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js')
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js'),
+        loadScript('https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js')
       ]);
     })
     .then(function(){
@@ -193,8 +194,13 @@ const SHAPES = [
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l6 10-6 10-6-10z"/></svg>'
 ];
 
+let urlCode = '';
+try{
+  urlCode = new URLSearchParams(window.location.search).get('code') || '';
+}catch(e){}
+
 let state = {
-  view: 'home',
+  view: urlCode ? 'join' : 'home',
   code: '',
   name: '',
   quiz: null,
@@ -218,15 +224,33 @@ let state = {
   answeredPids: null,
   mySessions: null,
   pendingAfterLogin: 'setup',
-  detailReport: null
+  detailReport: null,
+  prefillCode: urlCode
 };
 
 function render(){
   document.getElementById('cq-app').innerHTML = viewFor(state.view);
+  if(state.view === 'host-live' && state.quiz && window.QRCode){
+    renderJoinQR();
+  }
 }
 
 function genCode(){ return String(Math.floor(1000 + Math.random()*9000)); }
 function genId(){ return 'p' + Math.random().toString(36).slice(2,10); }
+
+function joinUrlFor(code){
+  return window.location.origin + window.location.pathname + '?code=' + code;
+}
+
+function renderJoinQR(){
+  const canvas = document.getElementById('cq-qr-canvas');
+  if(!canvas || !window.QRCode) return;
+  if(canvas.dataset.code === state.code) return;
+  window.QRCode.toCanvas(canvas, joinUrlFor(state.code), { width: 168, margin: 1 }, function(err){
+    if(!err) canvas.dataset.code = state.code;
+    else console.error('QR oluşturulamadı', err);
+  });
+}
 
 function fmtDate(ts){
   if(!ts) return '';
@@ -1006,6 +1030,10 @@ function hostLiveView(){
     <div class="status-pill">Kod: ${state.code}</div>
     <div class="code-display">${state.code}</div>
     <p class="code-sub">Katılımcılar bu kodla katılabilir · Soru ${state.quiz.currentIndex+1}/${total}</p>
+    <div class="card" style="text-align:center;">
+      <canvas id="cq-qr-canvas" width="168" height="168" style="background:#fff;border-radius:8px;padding:8px;"></canvas>
+      <p class="dim" style="font-size:12px;margin-top:8px;">Kamerayla okutarak katılabilirler</p>
+    </div>
   `;
 
   if(!started){
@@ -1098,7 +1126,7 @@ function joinView(){
     <div class="eyebrow">Katıl</div>
     <h2>Oturuma katıl</h2>
     <div class="card">
-      <input type="text" id="joinCode" placeholder="Oturum kodu (örn. 4821)" maxlength="4" inputmode="numeric">
+      <input type="text" id="joinCode" placeholder="Oturum kodu (örn. 4821)" maxlength="4" inputmode="numeric" value="${escapeHtml(state.prefillCode || '')}">
       <input type="text" id="joinName" placeholder="Adın">
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <button class="btn btn-primary" onclick="cqApp.joinSession()">Katıl</button>
