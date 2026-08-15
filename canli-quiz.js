@@ -25,6 +25,8 @@
 #canli-quiz-widget{
   margin:0;
   min-height:100vh;
+  max-width:100%;
+  overflow-x:hidden;
   background:
     radial-gradient(circle at 15% 10%, rgba(212,255,63,0.08), transparent 40%),
     radial-gradient(circle at 85% 85%, rgba(255,93,115,0.10), transparent 45%),
@@ -36,7 +38,7 @@
   padding:24px 16px 60px;
 }
 #canli-quiz-widget #cq-app{width:100%;max-width:560px;}
-#canli-quiz-widget h1,#canli-quiz-widget h2,#canli-quiz-widget h3{font-family:var(--font-display);margin:0 0 6px;}
+#canli-quiz-widget h1,#canli-quiz-widget h2,#canli-quiz-widget h3{font-family:var(--font-display);margin:0 0 6px;overflow-wrap:break-word;word-break:break-word;}
 #canli-quiz-widget .eyebrow{
   font-family:var(--font-display);font-weight:700;font-size:12px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--lime);margin-bottom:6px;
@@ -73,7 +75,7 @@
   text-shadow:0 0 24px rgba(212,255,63,0.35);
 }
 #canli-quiz-widget .code-sub{text-align:center;color:var(--text-dim);font-size:13px;margin-bottom:0;}
-#canli-quiz-widget .role-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+#canli-quiz-widget .role-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;}
 #canli-quiz-widget .role-card{
   background:var(--surface);border:1px solid rgba(255,255,255,0.06);border-radius:18px;
   padding:26px 16px;text-align:center;cursor:pointer;transition:border-color .15s ease;
@@ -92,13 +94,15 @@
 }
 #canli-quiz-widget .qlist-item span{color:var(--text);font-size:14px;}
 #canli-quiz-widget .small-x{background:transparent;border:none;color:var(--coral);font-size:18px;cursor:pointer;font-weight:700;}
-#canli-quiz-widget .answer-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;}
+#canli-quiz-widget .answer-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:14px;}
 #canli-quiz-widget .answer-tile{
   border:none;border-radius:16px;padding:22px 14px;font-family:var(--font-display);
   font-weight:700;font-size:16px;color:#14102B;cursor:pointer;text-align:left;
   display:flex;align-items:center;gap:10px;min-height:78px;
   transition:transform .12s ease, filter .12s ease;
+  width:100%;max-width:100%;min-width:0;overflow-wrap:break-word;word-break:break-word;
 }
+#canli-quiz-widget .answer-tile span{min-width:0;overflow-wrap:break-word;word-break:break-word;}
 #canli-quiz-widget .answer-tile:active{transform:scale(0.96);}
 #canli-quiz-widget .answer-tile:disabled{opacity:.55;cursor:default;}
 #canli-quiz-widget .answer-tile.correct-flash{outline:3px solid #fff;}
@@ -190,7 +194,7 @@ const fbApp = firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const auth = firebase.auth();
 
-const QUESTION_SECONDS = 15;
+const QUESTION_SECONDS = 30;
 
 const SHAPES = [
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#14102B"><path d="M12 3l9 18H3z"/></svg>',
@@ -910,6 +914,19 @@ function leaveSession(){
   render();
 }
 
+// Host "Oturumu kapat" dediğinde: oturumu Firestore'da da bitmiş işaretle,
+// böylece kimse artık bu koda katılamaz (sadece bu ekrandan çıkmış olmaz).
+async function endSessionNow(){
+  if(!confirm('Oturum tamamen kapatılsın mı? Bundan sonra hiç kimse bu kodla katılamaz.')) return;
+  try{
+    if(state.quiz && state.code){
+      state.quiz.ended = true;
+      await db.collection('quizzes').doc(state.code).set(state.quiz);
+    }
+  }catch(e){}
+  leaveSession();
+}
+
 function viewFor(view){
   switch(view){
     case 'home': return homeView();
@@ -1096,7 +1113,7 @@ function hostLiveView(){
 
   const header = `
     <div class="top-bar">
-      <button class="muted-link" onclick="if(confirm('Oturumdan çıkılsın mı?')) cqApp.leaveSession();">← Oturumu kapat</button>
+      <button class="muted-link" onclick="cqApp.endSessionNow()">← Oturumu kapat</button>
     </div>
     <h2 style="text-align:center;margin-bottom:2px;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</h2>
     <div class="status-pill">Kod: ${state.code}</div>
@@ -1327,7 +1344,7 @@ window.cqApp = {
   leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
   doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
   startQuestion, openManagePanel, manageSession, manageResults,
-  setDraftTitle, renameSession, deleteSession, openDetailReport
+  setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow
 };
 
 render();
