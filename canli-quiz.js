@@ -159,7 +159,7 @@
       return Promise.all([
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js')
+        loadScript('https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js')
       ]);
     })
     .then(function(){
