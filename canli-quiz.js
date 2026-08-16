@@ -169,11 +169,8 @@
 
   // E-posta bildirimleri için EmailJS — o da ayrı yükleniyor, başarısız olursa
   // sadece bildirim e-postaları gönderilemez, uygulamanın geri kalanı etkilenmez.
-  loadScript('https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js').then(function(){
-    if(window.emailjs && EMAILJS_PUBLIC_KEY && EMAILJS_PUBLIC_KEY.indexOf('DEĞİŞTİR') === -1){
-      window.emailjs.init(EMAILJS_PUBLIC_KEY);
-    }
-  }).catch(function(err){
+  // init() çağrısı runApp() içinde yapılıyor çünkü EMAILJS_PUBLIC_KEY orada tanımlı.
+  loadScript('https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js').catch(function(err){
     console.error('EmailJS yüklenemedi', err);
   });
 
@@ -217,7 +214,16 @@ const EMAILJS_SERVICE_ID = 'service_upxadjw';
 const EMAILJS_TEMPLATE_NEW_REGISTRATION = 'template_ojy9mif';
 const EMAILJS_TEMPLATE_APPROVED = 'template_hflahqm';
 
+let emailjsInited = false;
+function ensureEmailjsInit(){
+  if(!emailjsInited && window.emailjs && EMAILJS_PUBLIC_KEY && EMAILJS_PUBLIC_KEY.indexOf('DEĞİŞTİR') === -1){
+    window.emailjs.init(EMAILJS_PUBLIC_KEY);
+    emailjsInited = true;
+  }
+}
+
 function sendEmail(templateId, params){
+  ensureEmailjsInit();
   if(!window.emailjs || !EMAILJS_SERVICE_ID || EMAILJS_SERVICE_ID.indexOf('DEĞİŞTİR') !== -1){
     console.warn('EmailJS yapılandırılmadığı için e-posta gönderilmedi.', templateId, params);
     return;
@@ -226,6 +232,8 @@ function sendEmail(templateId, params){
     console.error('E-posta gönderilemedi', err);
   });
 }
+
+ensureEmailjsInit();
 
 function isSuperAdmin(){
   return !!(auth.currentUser && auth.currentUser.email === SUPERADMIN_EMAIL);
