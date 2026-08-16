@@ -459,8 +459,8 @@ async function doRegister(){
     render();
     return;
   }
-  if(pw.length < 6){
-    state.errorMsg = 'Şifre en az 6 karakter olmalı.';
+  if(pw.length < 8 || !/[a-z]/.test(pw) || !/[A-Z]/.test(pw) || !/[0-9]/.test(pw)){
+    state.errorMsg = 'Şifre en az 8 karakter olmalı, büyük harf, küçük harf ve rakam içermeli.';
     render();
     return;
   }
@@ -482,7 +482,7 @@ async function doRegister(){
     if(e.code === 'auth/email-already-in-use'){
       state.errorMsg = 'Bu e-posta zaten kayıtlı. Giriş yapmayı dene.';
     } else if(e.code === 'auth/weak-password'){
-      state.errorMsg = 'Şifre çok zayıf, en az 6 karakter olmalı.';
+      state.errorMsg = 'Şifre çok zayıf. En az 8 karakter, büyük/küçük harf ve rakam içermeli.';
     } else if(e.code === 'auth/invalid-email'){
       state.errorMsg = 'Geçersiz e-posta adresi.';
     } else {
@@ -672,6 +672,7 @@ async function deleteMyAccount(){
   }
 
   const uid = auth.currentUser.uid;
+  const deletedEmail = auth.currentUser.email;
   try{
     const quizSnap = await db.collection('quizzes').where('createdBy', '==', uid).get();
     for(const d of quizSnap.docs){
@@ -683,7 +684,7 @@ async function deleteMyAccount(){
     await db.collection('admins').doc(uid).delete();
     await auth.currentUser.delete();
 
-    alert('Hesabın ve tüm verilerin silindi.');
+    alert('"' + deletedEmail + '" hesabı ve tüm verileri kalıcı olarak silindi.');
     leaveSession();
   }catch(e){
     alert('Hesap silinirken bir sorun oluştu. Bazı veriler silinmiş olabilir — lütfen bizimle iletişime geç.');
@@ -1216,7 +1217,7 @@ function registerView(){
     <div class="card">
       <input type="text" id="loginDisplayName" placeholder="Adın / Kurum adın">
       <input type="text" id="loginEmail" placeholder="E-posta">
-      <input type="password" id="loginPass" placeholder="Şifre (en az 6 karakter)">
+      <input type="password" id="loginPass" placeholder="Şifre (en az 8 karakter, büyük/küçük harf, rakam)">
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <button class="btn btn-primary" onclick="cqApp.doRegister()">Kayıt Ol</button>
     </div>
@@ -1229,7 +1230,7 @@ function registerDoneView(){
     <div class="eyebrow">Kayıt Alındı</div>
     <h2>Onay bekleniyor</h2>
     <div class="card">
-      <p>Kayıt talebin alındı. Yönetici onayladıktan sonra e-posta ve şifrenle giriş yapıp oturum oluşturabileceksin.</p>
+      <p>Kayıt talebin alındı. Yönetici onayladıktan sonra kayıtlı e-posta adresine onay maili gelecektir.</p>
     </div>
     <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
   `;
@@ -1238,8 +1239,8 @@ function registerDoneView(){
 function homeView(){
   return `
     <div class="eyebrow">Canlı Quiz</div>
-    <h1>Ekibinizle Eş Zamanlı Bilgi Ölçümü</h1>
-    <p>Yönetici hesabını oluştur ya da elindeki kodla bir oturuma katıl.</p>
+    <h1>Herkes aynı anda oynasın</h1>
+    <p>Bir oturum oluştur ya da elindeki kodla bir oturuma katıl. Hesap gerekmez.</p>
     <div class="role-grid" style="margin-top:20px;">
       <div class="role-card" onclick="cqApp.startHostSetup()">
         <span class="icon">🎛️</span>
