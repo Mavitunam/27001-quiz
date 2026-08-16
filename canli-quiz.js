@@ -167,6 +167,16 @@
     console.error('QR kütüphanesi yüklenemedi', err);
   });
 
+  // E-posta bildirimleri için EmailJS — o da ayrı yükleniyor, başarısız olursa
+  // sadece bildirim e-postaları gönderilemez, uygulamanın geri kalanı etkilenmez.
+  loadScript('https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js').then(function(){
+    if(window.emailjs && EMAILJS_PUBLIC_KEY && EMAILJS_PUBLIC_KEY.indexOf('DEĞİŞTİR') === -1){
+      window.emailjs.init(EMAILJS_PUBLIC_KEY);
+    }
+  }).catch(function(err){
+    console.error('EmailJS yüklenemedi', err);
+  });
+
   loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js')
     .then(function(){
       return Promise.all([
@@ -199,6 +209,23 @@ const auth = firebase.auth();
 
 const QUESTION_SECONDS = 30;
 const SUPERADMIN_EMAIL = 'ktekkol@gmail.com';
+
+// --- EmailJS ayarları (e-posta bildirimleri için) ---
+// emailjs.com üzerinden ücretsiz hesap açıp bu 4 değeri kendi bilgilerinle değiştir.
+const EMAILJS_PUBLIC_KEY = 'WcQLdX361FDPGtmS4';
+const EMAILJS_SERVICE_ID = 'service_upxadjw';
+const EMAILJS_TEMPLATE_NEW_REGISTRATION = 'template_ojy9mif';
+const EMAILJS_TEMPLATE_APPROVED = 'template_hflahqm';
+
+function sendEmail(templateId, params){
+  if(!window.emailjs || !EMAILJS_SERVICE_ID || EMAILJS_SERVICE_ID.indexOf('DEĞİŞTİR') !== -1){
+    console.warn('EmailJS yapılandırılmadığı için e-posta gönderilmedi.', templateId, params);
+    return;
+  }
+  window.emailjs.send(EMAILJS_SERVICE_ID, templateId, params).catch(function(err){
+    console.error('E-posta gönderilemedi', err);
+  });
+}
 
 function isSuperAdmin(){
   return !!(auth.currentUser && auth.currentUser.email === SUPERADMIN_EMAIL);
@@ -434,6 +461,11 @@ async function doRegister(){
     await db.collection('admins').doc(cred.user.uid).set({
       email, name: displayName || email, approved: false, createdAt: Date.now()
     });
+    sendEmail(EMAILJS_TEMPLATE_NEW_REGISTRATION, {
+      to_email: SUPERADMIN_EMAIL,
+      applicant_name: displayName || email,
+      applicant_email: email
+    });
     await auth.signOut();
     state.errorMsg = '';
     state.view = 'register-done';
@@ -514,7 +546,13 @@ async function approveAdmin(uid){
   try{
     await db.collection('admins').doc(uid).update({ approved: true });
     const a = (state.pendingAdmins||[]).find(x => x.uid === uid);
-    if(a) a.approved = true;
+    if(a){
+      a.approved = true;
+      sendEmail(EMAILJS_TEMPLATE_APPROVED, {
+        to_email: a.email,
+        applicant_name: a.name || a.email
+      });
+    }
     render();
   }catch(e){
     alert('Onaylanamadı, tekrar dener misin?');
@@ -580,16 +618,69 @@ async function renameSession(code){
 async function deleteSession(code){
   if(!confirm('Bu oturum ve tüm cevapları kalıcı olarak silinecek. Emin misin?')) return;
   try{
-    const subcols = ['answers', 'scores', 'participants'];
-    for(const sub of subcols){
-      const snap = await db.collection('quizzes').doc(code).collection(sub).get();
-      await Promise.all(snap.docs.map(d => d.ref.delete()));
-    }
-    await db.collection('quizzes').doc(code).delete();
+    await deleteQuizCascade(code);
     state.mySessions = (state.mySessions||[]).filter(s => s.code !== code);
     render();
   }catch(e){
     alert('Silinemedi, tekrar dener misin?');
+  }
+}
+
+// Bir oturumu ve tüm alt koleksiyonlarını (answers/scores/participants) siler
+async function deleteQuizCascade(code){
+  const subcols = ['answers', 'scores', 'participants'];
+  for(const sub of subcols){
+    const snap = await db.collection('quizzes').doc(code).collection(sub).get();
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
+  }
+  await db.collection('quizzes').doc(code).delete();
+}
+
+// Yönetici kendi hesabını siler: kendi oluşturduğu tüm oturumlar + şablonlar +
+// admin kaydı + giriş hesabının kendisi kalıcı olarak silinir.
+async function deleteMyAccount(){
+  if(!auth.currentUser) return;
+  const sure = confirm(
+    'Hesabını silmek üzeresin.\n\n' +
+    'Bu işlem, oluşturduğun TÜM oturumları, cevapları ve kayıtlı soru şablonlarını ' +
+    'kalıcı olarak silecek. Bu işlem GERİ ALINAMAZ.\n\n' +
+    'Devam etmek istediğine emin misin?'
+  );
+  if(!sure) return;
+
+  const uid = auth.currentUser.uid;
+  try{
+    const quizSnap = await db.collection('quizzes').where('createdBy', '==', uid).get();
+    for(const d of quizSnap.docs){
+      await deleteQuizCascade(d.id);
+    }
+    const tplSnap = await db.collection('templates').where('createdBy', '==', uid).get();
+    await Promise.all(tplSnap.docs.map(d => d.ref.delete()));
+
+    await db.collection('admins').doc(uid).delete();
+
+    try{
+      await auth.currentUser.delete();
+    }catch(e){
+      if(e.code === 'auth/requires-recent-login'){
+        const pw = prompt('Güvenlik nedeniyle şifreni tekrar girmen gerekiyor:');
+        if(pw){
+          const cred = firebase.auth.EmailAuthProvider.credential(auth.currentUser.email, pw);
+          await auth.currentUser.reauthenticateWithCredential(cred);
+          await auth.currentUser.delete();
+        } else {
+          alert('Verilerin silindi, ancak giriş hesabın silinemedi. Tekrar dener misin?');
+        }
+      } else {
+        throw e;
+      }
+    }
+
+    alert('Hesabın ve tüm verilerin silindi.');
+    leaveSession();
+  }catch(e){
+    alert('Hesap silinirken bir hata oluştu, tekrar dener misin?');
+    console.error(e);
   }
 }
 
@@ -621,7 +712,7 @@ async function openDetailReport(code){
 
 async function loadTemplates(){
   try{
-    const snap = await db.collection('templates').get();
+    const snap = await db.collection('templates').where('createdBy', '==', auth.currentUser.uid).get();
     const list = [];
     snap.forEach(d => list.push({ id: d.id, ...d.data() }));
     list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
@@ -643,6 +734,7 @@ async function saveTemplate(){
     await db.collection('templates').add({
       title: title.trim(),
       questions: state.draftQuestions,
+      createdBy: auth.currentUser.uid,
       createdAt: Date.now()
     });
     await loadTemplates();
@@ -1224,6 +1316,7 @@ function manageView(){
       ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturulmadı.</p>'}
     </div>
     <button class="btn btn-primary" onclick="cqApp.startHostSetup()">+ Yeni Oturum Oluştur</button>
+    <button class="btn btn-secondary" style="color:var(--coral);margin-top:16px;" onclick="cqApp.deleteMyAccount()">🗑 Hesabımı Sil</button>
   `;
 }
 
@@ -1558,7 +1651,7 @@ window.cqApp = {
   doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
   startQuestion, openManagePanel, manageSession, manageResults,
   setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow,
-  doRegister, showRegisterView, approveAdmin, rejectAdmin
+  doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount
 };
 
 render();
