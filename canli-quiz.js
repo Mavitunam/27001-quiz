@@ -656,6 +656,21 @@ async function deleteMyAccount(){
   );
   if(!sure) return;
 
+  // Önce şifre doğrulaması isteniyor — bu sayede en sona kalan giriş hesabı
+  // silme adımı asla "yeniden giriş gerekiyor" hatasıyla yarım kalmaz.
+  const pw = prompt('Güvenlik için şifreni tekrar gir:');
+  if(!pw){
+    alert('İşlem iptal edildi, hesabın silinmedi.');
+    return;
+  }
+  try{
+    const cred = firebase.auth.EmailAuthProvider.credential(auth.currentUser.email, pw);
+    await auth.currentUser.reauthenticateWithCredential(cred);
+  }catch(e){
+    alert('Şifre doğrulanamadı. Hesabın silinmedi, tekrar dener misin?');
+    return;
+  }
+
   const uid = auth.currentUser.uid;
   try{
     const quizSnap = await db.collection('quizzes').where('createdBy', '==', uid).get();
@@ -666,28 +681,12 @@ async function deleteMyAccount(){
     await Promise.all(tplSnap.docs.map(d => d.ref.delete()));
 
     await db.collection('admins').doc(uid).delete();
-
-    try{
-      await auth.currentUser.delete();
-    }catch(e){
-      if(e.code === 'auth/requires-recent-login'){
-        const pw = prompt('Güvenlik nedeniyle şifreni tekrar girmen gerekiyor:');
-        if(pw){
-          const cred = firebase.auth.EmailAuthProvider.credential(auth.currentUser.email, pw);
-          await auth.currentUser.reauthenticateWithCredential(cred);
-          await auth.currentUser.delete();
-        } else {
-          alert('Verilerin silindi, ancak giriş hesabın silinemedi. Tekrar dener misin?');
-        }
-      } else {
-        throw e;
-      }
-    }
+    await auth.currentUser.delete();
 
     alert('Hesabın ve tüm verilerin silindi.');
     leaveSession();
   }catch(e){
-    alert('Hesap silinirken bir hata oluştu, tekrar dener misin?');
+    alert('Hesap silinirken bir sorun oluştu. Bazı veriler silinmiş olabilir — lütfen bizimle iletişime geç.');
     console.error(e);
   }
 }
