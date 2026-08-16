@@ -198,6 +198,11 @@ const db = firebase.firestore();
 const auth = firebase.auth();
 
 const QUESTION_SECONDS = 30;
+const SUPERADMIN_EMAIL = 'ktekkol@gmail.com';
+
+function isSuperAdmin(){
+  return !!(auth.currentUser && auth.currentUser.email === SUPERADMIN_EMAIL);
+}
 
 const SHAPES = [
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#14102B"><path d="M12 3l9 18H3z"/></svg>',
@@ -241,6 +246,7 @@ let state = {
   participantsList: [],
   answeredPids: null,
   mySessions: null,
+  pendingAdmins: null,
   pendingAfterLogin: 'setup',
   detailReport: null,
   prefillCode: urlCode
@@ -320,10 +326,28 @@ function goHome(){
   render();
 }
 
+async function isApprovedAdmin(){
+  if(isSuperAdmin()) return true;
+  if(!auth.currentUser) return false;
+  try{
+    const snap = await db.collection('admins').doc(auth.currentUser.uid).get();
+    return snap.exists && snap.data().approved === true;
+  }catch(e){
+    return false;
+  }
+}
+
 async function startHostSetup(){
   state.pendingAfterLogin = 'setup';
   if(auth.currentUser){
-    await enterSetup();
+    if(await isApprovedAdmin()){
+      await enterSetup();
+      return;
+    }
+    state.errorMsg = 'Hesabın onaylanmadı ya da onayı kaldırılmış.';
+    auth.signOut();
+    state.view = 'login';
+    render();
     return;
   }
   state.view = 'login';
@@ -334,7 +358,14 @@ async function startHostSetup(){
 async function openManagePanel(){
   state.pendingAfterLogin = 'manage';
   if(auth.currentUser){
-    await enterManage();
+    if(await isApprovedAdmin()){
+      await enterManage();
+      return;
+    }
+    state.errorMsg = 'Hesabın onaylanmadı ya da onayı kaldırılmış.';
+    auth.signOut();
+    state.view = 'login';
+    render();
     return;
   }
   state.view = 'login';
@@ -352,13 +383,79 @@ async function doLogin(){
   }
   try{
     await auth.signInWithEmailAndPassword(email, pw);
-    state.errorMsg = '';
-    if(state.pendingAfterLogin === 'manage') await enterManage();
-    else await enterSetup();
   }catch(e){
     state.errorMsg = 'E-posta veya şifre hatalı.';
     render();
+    return;
   }
+  // Süper admin her zaman onaylı sayılır
+  if(isSuperAdmin()){
+    state.errorMsg = '';
+    if(state.pendingAfterLogin === 'manage') await enterManage();
+    else await enterSetup();
+    return;
+  }
+  // Diğer herkes için onay durumu kontrol edilir
+  try{
+    const adminSnap = await db.collection('admins').doc(auth.currentUser.uid).get();
+    if(!adminSnap.exists || adminSnap.data().approved !== true){
+      state.errorMsg = 'Hesabın henüz onaylanmadı. Onaylandığında giriş yapabileceksin.';
+      auth.signOut();
+      render();
+      return;
+    }
+  }catch(e){
+    state.errorMsg = 'Hesap durumu kontrol edilemedi, tekrar dener misin?';
+    auth.signOut();
+    render();
+    return;
+  }
+  state.errorMsg = '';
+  if(state.pendingAfterLogin === 'manage') await enterManage();
+  else await enterSetup();
+}
+
+async function doRegister(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const pw = document.getElementById('loginPass').value;
+  const displayName = document.getElementById('loginDisplayName') ? document.getElementById('loginDisplayName').value.trim() : '';
+  if(!email || !pw){
+    state.errorMsg = 'E-posta ve şifre gir.';
+    render();
+    return;
+  }
+  if(pw.length < 6){
+    state.errorMsg = 'Şifre en az 6 karakter olmalı.';
+    render();
+    return;
+  }
+  try{
+    const cred = await auth.createUserWithEmailAndPassword(email, pw);
+    await db.collection('admins').doc(cred.user.uid).set({
+      email, name: displayName || email, approved: false, createdAt: Date.now()
+    });
+    await auth.signOut();
+    state.errorMsg = '';
+    state.view = 'register-done';
+    render();
+  }catch(e){
+    if(e.code === 'auth/email-already-in-use'){
+      state.errorMsg = 'Bu e-posta zaten kayıtlı. Giriş yapmayı dene.';
+    } else if(e.code === 'auth/weak-password'){
+      state.errorMsg = 'Şifre çok zayıf, en az 6 karakter olmalı.';
+    } else if(e.code === 'auth/invalid-email'){
+      state.errorMsg = 'Geçersiz e-posta adresi.';
+    } else {
+      state.errorMsg = 'Kayıt olunamadı, tekrar dener misin?';
+    }
+    render();
+  }
+}
+
+function showRegisterView(){
+  state.view = 'register';
+  state.errorMsg = '';
+  render();
 }
 
 function doLogout(){
@@ -383,9 +480,15 @@ async function enterManage(){
   stopListeners();
   state.view = 'manage';
   state.mySessions = null;
+  state.pendingAdmins = null;
   render();
   try{
-    const snap = await db.collection('quizzes').where('createdBy', '==', auth.currentUser.uid).get();
+    let snap;
+    if(isSuperAdmin()){
+      snap = await db.collection('quizzes').get();
+    } else {
+      snap = await db.collection('quizzes').where('createdBy', '==', auth.currentUser.uid).get();
+    }
     const rows = [];
     snap.forEach(d => rows.push({ code: d.id, ...d.data() }));
     rows.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
@@ -393,7 +496,40 @@ async function enterManage(){
   }catch(e){
     state.mySessions = [];
   }
+  if(isSuperAdmin()){
+    try{
+      const adminSnap = await db.collection('admins').get();
+      const list = [];
+      adminSnap.forEach(d => list.push({ uid: d.id, ...d.data() }));
+      list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      state.pendingAdmins = list;
+    }catch(e){
+      state.pendingAdmins = [];
+    }
+  }
   render();
+}
+
+async function approveAdmin(uid){
+  try{
+    await db.collection('admins').doc(uid).update({ approved: true });
+    const a = (state.pendingAdmins||[]).find(x => x.uid === uid);
+    if(a) a.approved = true;
+    render();
+  }catch(e){
+    alert('Onaylanamadı, tekrar dener misin?');
+  }
+}
+
+async function rejectAdmin(uid){
+  if(!confirm('Bu kaydı reddedip silmek istediğine emin misin?')) return;
+  try{
+    await db.collection('admins').doc(uid).delete();
+    state.pendingAdmins = (state.pendingAdmins||[]).filter(x => x.uid !== uid);
+    render();
+  }catch(e){
+    alert('Silinemedi, tekrar dener misin?');
+  }
 }
 
 async function manageSession(code){
@@ -584,7 +720,9 @@ async function launchSession(){
   const quiz = {
     title, questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false,
     started: false, questionStartedAt: null, revealedLeaderboard: null,
-    createdBy: auth.currentUser ? auth.currentUser.uid : null, createdAt: Date.now()
+    createdBy: auth.currentUser ? auth.currentUser.uid : null,
+    createdByEmail: auth.currentUser ? auth.currentUser.email : null,
+    createdAt: Date.now()
   };
   try{
     await db.collection('quizzes').doc(code).set(quiz);
@@ -918,7 +1056,7 @@ function leaveSession(){
     myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
     unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
-    unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAfterLogin:'setup',
+    unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAdmins:null, pendingAfterLogin:'setup',
     detailReport:null
   };
   render();
@@ -941,6 +1079,8 @@ function viewFor(view){
   switch(view){
     case 'home': return homeView();
     case 'login': return loginView();
+    case 'register': return registerView();
+    case 'register-done': return registerDoneView();
     case 'host-setup': return hostSetupView();
     case 'host-live': return hostLiveView();
     case 'host-results': return hostResultsView();
@@ -964,14 +1104,43 @@ function loginView(){
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <button class="btn btn-primary" onclick="cqApp.doLogin()">Giriş Yap</button>
     </div>
+    <button class="muted-link" style="display:block;margin:0 auto;" onclick="cqApp.showRegisterView()">Hesabın yok mu? Kayıt ol</button>
+  `;
+}
+
+function registerView(){
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div>
+    <div class="eyebrow">Yönetici Kaydı</div>
+    <h2>Yeni yönetici hesabı oluştur</h2>
+    <p class="dim">Kayıt olduktan sonra hesabın onaylanana kadar oturum oluşturamazsın.</p>
+    <div class="card">
+      <input type="text" id="loginDisplayName" placeholder="Adın / Kurum adın">
+      <input type="text" id="loginEmail" placeholder="E-posta">
+      <input type="password" id="loginPass" placeholder="Şifre (en az 6 karakter)">
+      ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
+      <button class="btn btn-primary" onclick="cqApp.doRegister()">Kayıt Ol</button>
+    </div>
+    <button class="muted-link" style="display:block;margin:0 auto;" onclick="cqApp.startHostSetup()">Zaten hesabın var mı? Giriş yap</button>
+  `;
+}
+
+function registerDoneView(){
+  return `
+    <div class="eyebrow">Kayıt Alındı</div>
+    <h2>Onay bekleniyor</h2>
+    <div class="card">
+      <p>Kayıt talebin alındı. Yönetici onayladıktan sonra e-posta ve şifrenle giriş yapıp oturum oluşturabileceksin.</p>
+    </div>
+    <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
   `;
 }
 
 function homeView(){
   return `
     <div class="eyebrow">Canlı Quiz</div>
-    <h1>Eğitimleri Yarışmaya Dönüştürün!</h1>
-    <p>Canlı sorular, anlık sonuçlar ve eğlenceli bilgi yarışmalarıyla katılımı artırın.</p>
+    <h1>Herkes aynı anda oynasın</h1>
+    <p>Bir oturum oluştur ya da elindeki kodla bir oturuma katıl. Hesap gerekmez.</p>
     <div class="role-grid" style="margin-top:20px;">
       <div class="role-card" onclick="cqApp.startHostSetup()">
         <span class="icon">🎛️</span>
@@ -992,6 +1161,7 @@ function manageView(){
   if(state.mySessions === null){
     return `<div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
   }
+  const superAdmin = isSuperAdmin();
   const rows = state.mySessions.map(s => {
     const total = (s.questions||[]).length;
     const status = s.ended ? 'Bitti' : (s.started ? 'Devam Ediyor' : 'Lobide Bekliyor');
@@ -1006,6 +1176,7 @@ function manageView(){
         <span style="font-size:12px;color:var(--lime);">Kod: ${s.code}</span>
         <span class="dim" style="font-size:11px;">${fmtDate(s.createdAt)}</span>
       </div>
+      ${superAdmin ? `<p class="dim" style="font-size:11px;margin:0 0 4px;">👤 ${escapeHtml(s.createdByEmail || 'bilinmiyor')}</p>` : ''}
       <p class="dim" style="font-size:12px;margin:0 0 8px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</p>
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
@@ -1017,12 +1188,40 @@ function manageView(){
       </div>
     </div>`;
   }).join('');
+
+  let pendingSection = '';
+  if(superAdmin){
+    const pending = (state.pendingAdmins||[]).filter(a => !a.approved);
+    const approved = (state.pendingAdmins||[]).filter(a => a.approved);
+    const pendingRows = pending.map(a => `
+      <div class="qlist-item">
+        <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">${escapeHtml(a.email)}</span></span>
+        <div style="display:flex;gap:8px;">
+          <button class="muted-link" onclick="cqApp.approveAdmin('${a.uid}')">✓ Onayla</button>
+          <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')">✕</button>
+        </div>
+      </div>
+    `).join('');
+    const approvedRows = approved.map(a => `
+      <div class="row"><span>${escapeHtml(a.name || a.email)} <span class="dim">(${escapeHtml(a.email)})</span></span>
+      <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')" title="Erişimi kaldır">✕</button></div>
+    `).join('');
+    pendingSection = `
+      <div class="card">
+        <h3 style="font-size:15px;">Bekleyen Onaylar (${pending.length})</h3>
+        ${pending.length ? pendingRows : '<p class="dim" style="font-size:13px;">Bekleyen kayıt yok.</p>'}
+      </div>
+      ${approved.length ? `<div class="card"><h3 style="font-size:15px;">Onaylı Yöneticiler (${approved.length})</h3>${approvedRows}</div>` : ''}
+    `;
+  }
+
   return `
     <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
-    <div class="eyebrow">Oturumlarım</div>
-    <h2>Oluşturduğun oturumlar</h2>
+    <div class="eyebrow">${superAdmin ? 'Süper Admin Paneli' : 'Oturumlarım'}</div>
+    <h2>${superAdmin ? 'Tüm oturumlar' : 'Oluşturduğun oturumlar'}</h2>
+    ${pendingSection}
     <div class="card">
-      ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturmadın.</p>'}
+      ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturulmadı.</p>'}
     </div>
     <button class="btn btn-primary" onclick="cqApp.startHostSetup()">+ Yeni Oturum Oluştur</button>
   `;
@@ -1358,7 +1557,8 @@ window.cqApp = {
   leaveSession, goHome, saveTemplate, useTemplate, deleteTemplate,
   doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
   startQuestion, openManagePanel, manageSession, manageResults,
-  setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow
+  setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow,
+  doRegister, showRegisterView, approveAdmin, rejectAdmin
 };
 
 render();
