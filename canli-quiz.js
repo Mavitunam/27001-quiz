@@ -776,16 +776,18 @@ function addDraftQuestion(){
   const qInput = document.getElementById('draftQText').value.trim();
   const opts = [0,1,2,3].map(i => document.getElementById('draftOpt'+i).value.trim());
   const correct = parseInt(document.querySelector('input[name=draftCorrect]:checked').value, 10);
+  const noteEl = document.getElementById('draftNote');
+  const note = noteEl ? noteEl.value.trim() : '';
   if(!qInput || opts.some(o=>!o)){
     state.errorMsg = 'Lütfen soru metnini ve 4 seçeneği de doldur.';
     render();
     return;
   }
   if(state.editingIndex !== null && state.editingIndex !== undefined){
-    state.draftQuestions[state.editingIndex] = { q: qInput, options: opts, correct };
+    state.draftQuestions[state.editingIndex] = { q: qInput, options: opts, correct, note };
     state.editingIndex = null;
   } else {
-    state.draftQuestions.push({ q: qInput, options: opts, correct });
+    state.draftQuestions.push({ q: qInput, options: opts, correct, note });
   }
   state.errorMsg = '';
   render();
@@ -1332,7 +1334,7 @@ function hostSetupView(){
   const editQ = (state.editingIndex !== null && state.editingIndex !== undefined) ? state.draftQuestions[state.editingIndex] : null;
   const qItems = state.draftQuestions.map((q,i)=>`
     <div class="qlist-item" style="${i===state.editingIndex ? 'outline:2px solid var(--gold);' : ''}">
-      <span>${i+1}. ${escapeHtml(q.q)}</span>
+      <span>${i+1}. ${escapeHtml(q.q)}${q.note ? ' <span class="dim" style="font-size:11px;" title="Notu var">📝</span>' : ''}</span>
       <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;">
         <button class="muted-link" onclick="cqApp.editDraftQuestion(${i})">Düzenle</button>
         <button class="small-x" onclick="cqApp.removeDraftQuestion(${i})">✕</button>
@@ -1380,6 +1382,7 @@ function hostSetupView(){
         <input type="text" id="draftOpt3" placeholder="Seçenek 4" value="${editQ ? escapeHtml(editQ.options[3]) : ''}">
         <input type="radio" name="draftCorrect" value="3" ${editQ && editQ.correct===3 ? 'checked' : ''}></div>
       <p style="font-size:12px;margin:2px 0 12px;">İşaretli radyo butonu doğru cevabı gösterir.</p>
+      <textarea id="draftNote" placeholder="Bu soruyla ilgili yöneticiye özel not (opsiyonel — cevabı gösterdiğinde sana gösterilir, katılımcılar görmez)" style="width:100%;background:var(--surface-2);border:1px solid rgba(255,255,255,0.1);color:var(--text);border-radius:12px;padding:13px 14px;font-size:14px;font-family:var(--font-body);margin-bottom:10px;min-height:70px;resize:vertical;">${editQ && editQ.note ? escapeHtml(editQ.note) : ''}</textarea>
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="cqApp.addDraftQuestion()">${editQ ? '✓ Güncelle' : '+ Soruyu Ekle'}</button>
@@ -1458,6 +1461,7 @@ function hostLiveView(){
         <span>${state.answerCount}/${pList.length} kişi cevapladı</span>
         <span>${state.quiz.revealed ? state.correctCount + ' doğru' : ''}</span>
       </div>
+      ${state.quiz.revealed && q.note ? `<div style="margin-top:12px;padding:12px;background:var(--surface-2);border-left:3px solid var(--gold);border-radius:8px;"><p style="font-size:12px;color:var(--gold);font-weight:700;margin:0 0 4px;">📝 Not (sadece sana görünür)</p><p style="font-size:14px;margin:0;white-space:pre-wrap;">${escapeHtml(q.note)}</p></div>` : ''}
     </div>
     ${participantsCard}
     <div class="btn-row">
