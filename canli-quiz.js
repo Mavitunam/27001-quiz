@@ -265,6 +265,8 @@ let state = {
   draftQuestions: [],
   draftTitle: '',
   editingIndex: null,
+  activeTemplateId: null,
+  activeTemplateTitle: '',
   participantId: null,
   answeredThisQ: false,
   myAnswerIdx: null,
@@ -731,6 +733,16 @@ async function loadTemplates(){
   state.templatesLoaded = true;
 }
 
+// Sorular aktif bir şablondan yüklendiyse, değişiklikleri otomatik olarak o şablona geri yazar
+async function syncActiveTemplate(){
+  if(!state.activeTemplateId) return;
+  try{
+    await db.collection('templates').doc(state.activeTemplateId).update({ questions: state.draftQuestions });
+  }catch(e){
+    console.error('Şablon otomatik güncellenemedi', e);
+  }
+}
+
 async function saveTemplate(){
   if(state.draftQuestions.length === 0){
     alert('Kaydetmeden önce en az bir soru ekle.');
@@ -739,12 +751,14 @@ async function saveTemplate(){
   const title = prompt('Bu soru setine bir isim ver (örn. "Hijyen Eğitimi - Modül 1"):');
   if(!title || !title.trim()) return;
   try{
-    await db.collection('templates').add({
+    const docRef = await db.collection('templates').add({
       title: title.trim(),
       questions: state.draftQuestions,
       createdBy: auth.currentUser.uid,
       createdAt: Date.now()
     });
+    state.activeTemplateId = docRef.id;
+    state.activeTemplateTitle = title.trim();
     await loadTemplates();
     render();
   }catch(e){
@@ -757,6 +771,8 @@ function useTemplate(id){
   if(!t) return;
   state.draftQuestions = JSON.parse(JSON.stringify(t.questions));
   if(!state.draftTitle) state.draftTitle = t.title;
+  state.activeTemplateId = id;
+  state.activeTemplateTitle = t.title;
   state.errorMsg = '';
   render();
 }
@@ -765,6 +781,10 @@ async function deleteTemplate(id){
   if(!confirm('Bu kayıtlı soru seti silinsin mi? Bu işlem geri alınamaz.')) return;
   try{
     await db.collection('templates').doc(id).delete();
+    if(state.activeTemplateId === id){
+      state.activeTemplateId = null;
+      state.activeTemplateTitle = '';
+    }
     await loadTemplates();
     render();
   }catch(e){
@@ -772,7 +792,7 @@ async function deleteTemplate(id){
   }
 }
 
-function addDraftQuestion(){
+async function addDraftQuestion(){
   const qInput = document.getElementById('draftQText').value.trim();
   const opts = [0,1,2,3].map(i => document.getElementById('draftOpt'+i).value.trim());
   const correct = parseInt(document.querySelector('input[name=draftCorrect]:checked').value, 10);
@@ -791,6 +811,7 @@ function addDraftQuestion(){
   }
   state.errorMsg = '';
   render();
+  await syncActiveTemplate();
 }
 
 function editDraftQuestion(idx){
@@ -805,10 +826,11 @@ function cancelEditDraftQuestion(){
   render();
 }
 
-function removeDraftQuestion(idx){
+async function removeDraftQuestion(idx){
   state.draftQuestions.splice(idx,1);
   if(state.editingIndex === idx) state.editingIndex = null;
   render();
+  await syncActiveTemplate();
 }
 
 async function launchSession(){
@@ -840,6 +862,8 @@ async function launchSession(){
   state.answerCount = 0;
   state.correctCount = 0;
   state.draftTitle = '';
+  state.activeTemplateId = null;
+  state.activeTemplateTitle = '';
   render();
   subscribeHostAnswers();
   subscribeHostParticipants();
@@ -1154,6 +1178,7 @@ function leaveSession(){
   stopListeners();
   state = {
     view:'home', code:'', name:'', quiz:null, draftQuestions:[], draftTitle:'', editingIndex:null,
+    activeTemplateId:null, activeTemplateTitle:'',
     participantId:null, answeredThisQ:false, myAnswerIdx:null, myScore:0,
     myCorrectCount:0, myAnsweredCount:0,
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
@@ -1363,6 +1388,7 @@ function hostSetupView(){
     <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
     <div class="eyebrow">Oturum Oluştur</div>
     <h2>Soruları hazırla</h2>
+    ${state.activeTemplateId ? `<div class="status-pill">🔗 "${escapeHtml(state.activeTemplateTitle)}" şablonuna bağlı — değişiklikler otomatik kaydedilir</div>` : ''}
     <div class="card">
       <input type="text" id="draftTitle" placeholder="Oturum adı (örn. Yangın Güvenliği Eğitimi)" value="${escapeHtml(state.draftTitle || '')}" oninput="cqApp.setDraftTitle(this.value)">
     </div>
