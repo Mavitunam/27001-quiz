@@ -508,11 +508,12 @@ function doLogout(){
 async function enterSetup(){
   state.view = 'host-setup';
   state.editingIndex = null;
-  if(state.draftQuestions.length === 0){
-    state.draftQuestions = [
-      { q: 'Türkiye\'nin başkenti neresidir?', options: ['İstanbul','Ankara','İzmir','Bursa'], correct: 1 }
-    ];
-  }
+  state.draftQuestions = [
+    { q: 'Türkiye\'nin başkenti neresidir?', options: ['İstanbul','Ankara','İzmir','Bursa'], correct: 1, note: '' }
+  ];
+  state.draftTitle = '';
+  state.activeTemplateId = null;
+  state.activeTemplateTitle = '';
   render();
   await loadTemplates();
   render();
