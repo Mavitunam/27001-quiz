@@ -205,6 +205,14 @@ const db = firebase.firestore();
 const auth = firebase.auth();
 
 const QUESTION_SECONDS = 30;
+
+const DEFAULT_SURVEY_QUESTIONS = [
+  'Eğitim içeriği beklentilerimi karşıladı.',
+  'Eğitmen konuya hakimdi ve sorularımı yanıtladı.',
+  'Eğitim süresi yeterliydi.',
+  'Eğitim materyalleri (sunum, doküman vb.) faydalıydı.',
+  'Bu eğitimi meslektaşlarıma tavsiye ederim.'
+];
 const SUPERADMIN_EMAIL = 'ktekkol@gmail.com';
 
 // --- EmailJS ayarları (e-posta bildirimleri için) ---
@@ -267,6 +275,10 @@ let state = {
   editingIndex: null,
   activeTemplateId: null,
   activeTemplateTitle: '',
+  surveyEnabled: false,
+  draftSurveyQuestions: [],
+  mySurveyAnswer: null,
+  surveyResults: null,
   participantId: null,
   answeredThisQ: false,
   myAnswerIdx: null,
@@ -514,9 +526,23 @@ async function enterSetup(){
   state.draftTitle = '';
   state.activeTemplateId = null;
   state.activeTemplateTitle = '';
+  state.surveyEnabled = false;
+  state.draftSurveyQuestions = DEFAULT_SURVEY_QUESTIONS.slice();
   render();
   await loadTemplates();
   render();
+}
+
+function toggleSurvey(){
+  state.surveyEnabled = !state.surveyEnabled;
+  if(state.surveyEnabled && state.draftSurveyQuestions.length === 0){
+    state.draftSurveyQuestions = DEFAULT_SURVEY_QUESTIONS.slice();
+  }
+  render();
+}
+
+function setSurveyQuestion(i, val){
+  state.draftSurveyQuestions[i] = val;
 }
 
 async function enterManage(){
@@ -587,6 +613,13 @@ async function manageSession(code){
     if(!snap.exists){ alert('Oturum bulunamadı.'); return; }
     state.code = code;
     state.quiz = snap.data();
+    if(state.quiz.surveyActive && !state.quiz.ended){
+      state.view = 'host-survey';
+      render();
+      subscribeSurveyAnswers();
+      subscribeHostParticipants();
+      return;
+    }
     state.view = 'host-live';
     render();
     subscribeHostAnswers();
@@ -605,6 +638,9 @@ async function manageResults(code){
     state.leaderboard = leaderboard;
     state.code = code;
     state.quiz = quizSnap.exists ? quizSnap.data() : null;
+    state.surveyResults = (state.quiz && state.quiz.surveyEnabled)
+      ? await buildSurveyResults(code, state.quiz.surveyQuestions)
+      : null;
     state.view = 'host-results';
     render();
   }catch(e){
@@ -639,7 +675,7 @@ async function deleteSession(code){
 
 // Bir oturumu ve tüm alt koleksiyonlarını (answers/scores/participants) siler
 async function deleteQuizCascade(code){
-  const subcols = ['answers', 'scores', 'participants'];
+  const subcols = ['answers', 'scores', 'participants', 'surveyAnswers'];
   for(const sub of subcols){
     const snap = await db.collection('quizzes').doc(code).collection(sub).get();
     await Promise.all(snap.docs.map(d => d.ref.delete()));
@@ -845,6 +881,8 @@ async function launchSession(){
   const quiz = {
     title, questions: state.draftQuestions, currentIndex: 0, revealed: false, ended: false,
     started: false, questionStartedAt: null, revealedLeaderboard: null,
+    surveyEnabled: state.surveyEnabled, surveyQuestions: state.surveyEnabled ? state.draftSurveyQuestions.slice() : [],
+    surveyActive: false,
     createdBy: auth.currentUser ? auth.currentUser.uid : null,
     createdByEmail: auth.currentUser ? auth.currentUser.email : null,
     createdAt: Date.now()
@@ -921,12 +959,15 @@ async function revealCurrent(){
 async function nextQuestion(){
   const isLast = state.quiz.currentIndex >= state.quiz.questions.length - 1;
   if(isLast){
-    state.quiz.ended = true;
-    await db.collection('quizzes').doc(state.code).set(state.quiz);
-    stopListeners();
-    await loadLeaderboard();
-    state.view = 'host-results';
-    render();
+    if(state.quiz.surveyEnabled){
+      state.quiz.surveyActive = true;
+      await db.collection('quizzes').doc(state.code).set(state.quiz);
+      state.view = 'host-survey';
+      subscribeSurveyAnswers();
+      render();
+      return;
+    }
+    await finishSession();
     return;
   }
   state.quiz.currentIndex += 1;
@@ -937,6 +978,48 @@ async function nextQuestion(){
   await db.collection('quizzes').doc(state.code).set(state.quiz);
   render();
   subscribeHostAnswers();
+}
+
+async function finishSession(){
+  state.quiz.ended = true;
+  await db.collection('quizzes').doc(state.code).set(state.quiz);
+  stopListeners();
+  await loadLeaderboard();
+  if(state.quiz.surveyEnabled){
+    state.surveyResults = await buildSurveyResults(state.code, state.quiz.surveyQuestions);
+  }
+  state.view = 'host-results';
+  render();
+}
+
+function subscribeSurveyAnswers(){
+  if(state.unsubAnswers) state.unsubAnswers();
+  state.unsubAnswers = db.collection('quizzes').doc(state.code).collection('surveyAnswers')
+    .onSnapshot((snap) => {
+      state.answerCount = snap.size;
+      if(state.view === 'host-survey') render();
+    }, (err) => { console.error('survey listener error', err); });
+}
+
+// Anket cevaplarının ortalamasını ve yorumlarını hesaplar
+async function buildSurveyResults(code, questions){
+  try{
+    const snap = await db.collection('quizzes').doc(code).collection('surveyAnswers').get();
+    const sums = (questions||[]).map(()=>0);
+    const counts = (questions||[]).map(()=>0);
+    const comments = [];
+    snap.forEach(d => {
+      const data = d.data();
+      (data.ratings||[]).forEach((r,i) => {
+        if(typeof r === 'number' && sums[i] !== undefined){ sums[i] += r; counts[i]++; }
+      });
+      if(data.comment){ comments.push({ name: data.name, comment: data.comment }); }
+    });
+    const averages = sums.map((s,i) => counts[i] ? (s / counts[i]) : null);
+    return { averages, counts, comments, responseCount: snap.size };
+  }catch(e){
+    return { averages: [], counts: [], comments: [], responseCount: 0 };
+  }
 }
 
 // Katılan herkesi (cevap vermemiş olsa bile) puanlarıyla birlikte sıralı getirir
@@ -1111,7 +1194,7 @@ function subscribeParticipant(){
   state.unsubQuiz = db.collection('quizzes').doc(state.code).onSnapshot(async (snap) => {
     if(!snap.exists) return;
     const fresh = snap.data();
-    if(fresh.ended && state.view === 'participant-live'){
+    if(fresh.ended && (state.view === 'participant-live' || state.view === 'survey')){
       stopListeners();
       state.quiz = fresh;
       try{
@@ -1120,6 +1203,19 @@ function subscribeParticipant(){
         state.leaderboard = [];
       }
       state.view = 'participant-results';
+      render();
+      return;
+    }
+    if(fresh.surveyActive && state.view === 'participant-live'){
+      state.quiz = fresh;
+      // Daha önce anketi doldurmuş mu kontrol et (ör. sayfa yenilendiyse)
+      try{
+        const svSnap = await db.collection('quizzes').doc(state.code).collection('surveyAnswers').doc(state.participantId).get();
+        state.mySurveyAnswer = svSnap.exists ? svSnap.data() : null;
+      }catch(e){
+        state.mySurveyAnswer = null;
+      }
+      state.view = 'survey';
       render();
       return;
     }
@@ -1141,6 +1237,31 @@ function subscribeParticipant(){
   }, (err) => {
     console.error('quiz listener error', err);
   });
+}
+
+async function submitSurvey(){
+  const qs = state.quiz.surveyQuestions || [];
+  const ratings = [];
+  for(let i=0;i<qs.length;i++){
+    const el = document.querySelector('input[name=sv'+i+']:checked');
+    if(!el){
+      state.errorMsg = 'Lütfen tüm ifadeleri puanla.';
+      render();
+      return;
+    }
+    ratings.push(parseInt(el.value, 10));
+  }
+  const commentEl = document.getElementById('svComment');
+  const comment = commentEl ? commentEl.value.trim() : '';
+  const data = { name: state.name, ratings, comment, submittedAt: Date.now() };
+  try{
+    await db.collection('quizzes').doc(state.code).collection('surveyAnswers').doc(state.participantId).set(data);
+    state.mySurveyAnswer = data;
+    state.errorMsg = '';
+    render();
+  }catch(e){
+    alert('Gönderilemedi, tekrar dener misin?');
+  }
 }
 
 async function submitAnswer(idx){
@@ -1185,7 +1306,7 @@ function leaveSession(){
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
     unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
     unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAdmins:null, pendingAfterLogin:'setup',
-    detailReport:null
+    detailReport:null, surveyEnabled:false, draftSurveyQuestions:[], mySurveyAnswer:null, surveyResults:null
   };
   render();
 }
@@ -1217,6 +1338,8 @@ function viewFor(view){
     case 'manage': return manageView();
     case 'manage-detail': return manageDetailView();
     case 'participant-results': return participantResultsView();
+    case 'survey': return surveyView();
+    case 'host-survey': return hostSurveyView();
     default: return homeView();
   }
 }
@@ -1419,6 +1542,16 @@ function hostSetupView(){
     ${state.draftQuestions.length ? `<div class="card"><h3 style="font-size:15px;">Sorular (${state.draftQuestions.length})</h3>${qItems}
       <button class="btn btn-secondary" style="margin-top:4px;" onclick="cqApp.saveTemplate()">💾 Şablon Olarak Kaydet</button>
     </div>` : ''}
+    <div class="card">
+      <div class="row">
+        <h3 style="font-size:15px;margin:0;">📊 Eğitim Değerlendirme Anketi</h3>
+        <button class="muted-link" onclick="cqApp.toggleSurvey()">${state.surveyEnabled ? '✓ Açık' : 'Kapalı — açmak için tıkla'}</button>
+      </div>
+      <p class="dim" style="font-size:12px;">Sınav bitince katılımcılara bu 5 ifadeyi 1-5 arası puanlamalarını isteyen bir anket gösterilir. Eğitiminin etkinliğini ölçmek için kullanabilirsin.</p>
+      ${state.surveyEnabled ? state.draftSurveyQuestions.map((q,i)=>`
+        <input type="text" class="i" value="${escapeHtml(q)}" oninput="cqApp.setSurveyQuestion(${i}, this.value)" placeholder="Anket ifadesi ${i+1}">
+      `).join('') : ''}
+    </div>
     <button class="btn btn-primary" onclick="cqApp.launchSession()">Oturumu Başlat</button>
   `;
 }
@@ -1500,6 +1633,24 @@ function hostLiveView(){
   `;
 }
 
+function hostSurveyView(){
+  const pCount = (state.participantsList || []).length;
+  return `
+    <div class="top-bar">
+      <button class="muted-link" onclick="if(confirm('Oturumdan çıkılsın mı?')) cqApp.leaveSession();">← Oturumu kapat</button>
+    </div>
+    <h2 style="text-align:center;margin-bottom:2px;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</h2>
+    <div class="eyebrow" style="text-align:center;">📊 Değerlendirme Anketi</div>
+    <div class="card" style="text-align:center;">
+      <p>Sınav bitti, katılımcılardan değerlendirme anketini doldurmaları isteniyor.</p>
+      <p style="font-size:28px;font-weight:800;color:var(--lime);margin:8px 0;">${state.answerCount || 0} / ${pCount}</p>
+      <p class="dim" style="font-size:13px;">kişi anketi doldurdu</p>
+    </div>
+    <button class="btn btn-primary" onclick="cqApp.finishSession()">Anketi Bitir ve Sonuçları Gör</button>
+    <p class="dim" style="text-align:center;font-size:12px;margin-top:8px;">Herkes doldurana kadar bekleyebilirsin, istediğin an bitirebilirsin.</p>
+  `;
+}
+
 function hostResultsView(){
   const title = state.quiz ? (state.quiz.title || ('Oturum ' + state.code)) : 'Sonuçlar';
   const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
@@ -1514,10 +1665,37 @@ function hostResultsView(){
       <span class="sc">${r.score} p</span>
     </div>
   `;}).join('');
+
+  let surveySection = '';
+  if(state.quiz && state.quiz.surveyEnabled && state.surveyResults){
+    const sr = state.surveyResults;
+    const qs = state.quiz.surveyQuestions || [];
+    const avgRows = qs.map((q,i) => {
+      const avg = sr.averages[i];
+      return `
+      <div class="row">
+        <span style="font-size:13px;">${i+1}. ${escapeHtml(q)}</span>
+        <span style="font-weight:700;color:var(--lime);">${avg !== null ? avg.toFixed(1) + ' / 5' : '—'}</span>
+      </div>`;
+    }).join('');
+    const commentRows = sr.comments.map(c => `
+      <div class="qlist-item"><span>${escapeHtml(c.name)}: <span class="dim">"${escapeHtml(c.comment)}"</span></span></div>
+    `).join('');
+    surveySection = `
+      <div class="card">
+        <h3 style="font-size:15px;">📊 Değerlendirme Anketi Sonuçları</h3>
+        <p class="dim" style="font-size:12px;">${sr.responseCount} kişi doldurdu</p>
+        ${avgRows}
+        ${sr.comments.length ? `<h3 style="font-size:14px;margin-top:14px;">Yorumlar</h3>${commentRows}` : ''}
+      </div>
+    `;
+  }
+
   return `
     <div class="eyebrow">${escapeHtml(title)}</div>
     <h2>Puan Durumu</h2>
     <div class="card">${rows || '<p>Henüz kimse cevap vermedi.</p>'}</div>
+    ${surveySection}
     <button class="btn btn-secondary" onclick="cqApp.openDetailReport('${state.code}')">📋 Kim Neye Cevap Verdi?</button>
     <div class="btn-row" style="margin-top:8px;">
       <button class="btn btn-secondary" onclick="cqApp.openManagePanel()">Oturumlarım</button>
@@ -1547,6 +1725,47 @@ function participantResultsView(){
     <h2>Oturum Sona Erdi — Sonuçlar</h2>
     <div class="card">${rows || '<p>Kayıtlı sonuç yok.</p>'}</div>
     <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
+  `;
+}
+
+function surveyView(){
+  const qs = state.quiz.surveyQuestions || [];
+  if(state.mySurveyAnswer){
+    return `
+      <div class="top-bar"><span></span></div>
+      <div class="eyebrow" style="text-align:center;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</div>
+      <div class="card" style="text-align:center;">
+        <h2 style="font-size:19px;">Teşekkürler! 🙏</h2>
+        <p class="dim">Değerlendirmen kaydedildi. Yönetici sonuçları göstermesini bekliyorsun.</p>
+      </div>
+    `;
+  }
+  const labels = ['Kesinlikle Katılmıyorum','Katılmıyorum','Kararsızım','Katılıyorum','Kesinlikle Katılıyorum'];
+  const qItems = qs.map((q,i) => `
+    <div class="card">
+      <p style="font-weight:700;margin:0 0 10px;">${i+1}. ${escapeHtml(q)}</p>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${[1,2,3,4,5].map(v => `
+          <label style="display:flex;align-items:center;gap:8px;background:var(--surface-2);border-radius:8px;padding:9px 12px;cursor:pointer;">
+            <input type="radio" name="sv${i}" value="${v}">
+            <span style="font-size:13px;">${v} - ${labels[v-1]}</span>
+          </label>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+  return `
+    <div class="top-bar"><span style="font-size:13px;color:var(--text-dim);">${escapeHtml(state.name)}</span></div>
+    <div class="eyebrow" style="text-align:center;">${escapeHtml(state.quiz.title || ('Oturum ' + state.code))}</div>
+    <h2 style="text-align:center;">📊 Değerlendirme Anketi</h2>
+    <p class="dim" style="text-align:center;">Sınav bitti! Son olarak eğitimi değerlendirir misin?</p>
+    ${qItems}
+    <div class="card">
+      <p style="font-weight:700;margin:0 0 8px;">Eklemek istediğin bir şey var mı? (opsiyonel)</p>
+      <textarea id="svComment" placeholder="Görüş, öneri ya da yorumun..." style="width:100%;background:var(--surface-2);border:1px solid rgba(255,255,255,0.1);color:var(--text);border-radius:12px;padding:13px 14px;font-size:14px;font-family:var(--font-body);min-height:70px;resize:vertical;"></textarea>
+    </div>
+    ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
+    <button class="btn btn-primary" onclick="cqApp.submitSurvey()">Gönder</button>
   `;
 }
 
@@ -1690,7 +1909,8 @@ window.cqApp = {
   doLogin, doLogout, editDraftQuestion, cancelEditDraftQuestion,
   startQuestion, openManagePanel, manageSession, manageResults,
   setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow,
-  doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount
+  doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount,
+  toggleSurvey, setSurveyQuestion, submitSurvey, finishSession
 };
 
 render();
