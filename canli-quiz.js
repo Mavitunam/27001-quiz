@@ -253,6 +253,16 @@ const SHAPES = [
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#14102B"><circle cx="12" cy="12" r="9"/></svg>',
   '<svg class="shape-icon" viewBox="0 0 24 24" fill="#fff"><path d="M12 2l6 10-6 10-6-10z"/></svg>'
 ];
+const OPTION_LETTERS = ['A','B','C','D'];
+const DIFFICULTY_LABELS = { kolay: 'Kolay', orta: 'Orta', zor: 'Zor' };
+
+// İlk 3 sıra için madalya, sonrası için sıra numarası döner
+function rankBadge(i){
+  if(i===0) return '🥇';
+  if(i===1) return '🥈';
+  if(i===2) return '🥉';
+  return String(i+1);
+}
 
 let urlCode = '';
 try{
@@ -368,6 +378,28 @@ setInterval(function(){
     render();
   }
 }, 1000);
+
+function shareMyResult(rank, score){
+  const title = state.quiz ? (state.quiz.title || 'Canlı Quiz') : 'Canlı Quiz';
+  const text = '"' + title + '" oturumunda ' + rank + '. sırada bitirdim, ' + score + ' puan aldım! 🎉';
+  if(navigator.share){
+    navigator.share({ text: text }).catch(function(){});
+  } else {
+    const url = 'https://www.linkedin.com/sharing/share-offsite/?url=' + encodeURIComponent(window.location.origin) + '&summary=' + encodeURIComponent(text);
+    window.open(url, '_blank');
+  }
+}
+
+function reportIssue(){
+  const msg = prompt('Yaşadığın sorunu ya da önerini kısaca yaz:');
+  if(!msg || !msg.trim()) return;
+  const subject = encodeURIComponent('Canlı Quiz - Sorun/Öneri Bildirimi');
+  const body = encodeURIComponent(
+    msg.trim() + '\n\n---\nOturum kodu: ' + (state.code || '-') +
+    '\nSayfa: ' + window.location.href
+  );
+  window.location.href = 'mailto:' + SUPERADMIN_EMAIL + '?subject=' + subject + '&body=' + body;
+}
 
 function goHome(){
   stopListeners();
@@ -835,16 +867,18 @@ async function addDraftQuestion(){
   const correct = parseInt(document.querySelector('input[name=draftCorrect]:checked').value, 10);
   const noteEl = document.getElementById('draftNote');
   const note = noteEl ? noteEl.value.trim() : '';
+  const diffEl = document.getElementById('draftDifficulty');
+  const difficulty = diffEl ? diffEl.value : 'orta';
   if(!qInput || opts.some(o=>!o)){
     state.errorMsg = 'Lütfen soru metnini ve 4 seçeneği de doldur.';
     render();
     return;
   }
   if(state.editingIndex !== null && state.editingIndex !== undefined){
-    state.draftQuestions[state.editingIndex] = { q: qInput, options: opts, correct, note };
+    state.draftQuestions[state.editingIndex] = { q: qInput, options: opts, correct, note, difficulty };
     state.editingIndex = null;
   } else {
-    state.draftQuestions.push({ q: qInput, options: opts, correct, note });
+    state.draftQuestions.push({ q: qInput, options: opts, correct, note, difficulty });
   }
   state.errorMsg = '';
   render();
@@ -936,6 +970,23 @@ function subscribeHostParticipants(){
     }, (err) => {
       console.error('participants listener error', err);
     });
+}
+
+// Yönetici bir katılımcının ismini düzeltebilir (yazım hatası vb.)
+async function renameParticipant(pid, currentName){
+  const newName = prompt('Katılımcının yeni ismi:', currentName || '');
+  if(newName === null || !newName.trim()) return;
+  const trimmed = newName.trim();
+  try{
+    await db.collection('quizzes').doc(state.code).collection('participants').doc(pid).set({ name: trimmed }, { merge: true });
+    const scoreRef = db.collection('quizzes').doc(state.code).collection('scores').doc(pid);
+    const scoreSnap = await scoreRef.get();
+    if(scoreSnap.exists){
+      await scoreRef.set({ name: trimmed }, { merge: true });
+    }
+  }catch(e){
+    alert('İsim değiştirilemedi, tekrar dener misin?');
+  }
 }
 
 async function startQuestion(){
@@ -1129,6 +1180,18 @@ async function joinSession(){
     storeParticipantId(code, pid);
   }
   state.participantId = pid;
+
+  // Aynı oturumda aynı isim kontrolü (kendi kayıtlı ismi hariç)
+  try{
+    const dupSnap = await db.collection('quizzes').doc(code).collection('participants').get();
+    const nameLower = name.trim().toLowerCase();
+    const dup = dupSnap.docs.find(d => d.id !== pid && (d.data().name||'').trim().toLowerCase() === nameLower);
+    if(dup){
+      state.errorMsg = 'Bu isim oturumda zaten kullanılıyor. Lütfen farklı bir isim dene (ör. soyadını da ekle).';
+      render();
+      return;
+    }
+  }catch(e){}
 
   // İsim kilidi: bu kimlik için daha önce bir isim kaydedildiyse, o isim korunur —
   // yeni yazılan isim yok sayılır (sonuçları manipüle etmeyi engeller).
@@ -1405,6 +1468,7 @@ function homeView(){
       </div>
     </div>
     <button class="muted-link" style="display:block;margin:14px auto 0;" onclick="cqApp.openManagePanel()">📋 Oturumlarımı Yönet</button>
+    <button class="muted-link" style="display:block;margin:8px auto 0;" onclick="cqApp.reportIssue()">🐞 Sorun Bildir</button>
   `;
 }
 
@@ -1483,7 +1547,7 @@ function hostSetupView(){
   const editQ = (state.editingIndex !== null && state.editingIndex !== undefined) ? state.draftQuestions[state.editingIndex] : null;
   const qItems = state.draftQuestions.map((q,i)=>`
     <div class="qlist-item" style="${i===state.editingIndex ? 'outline:2px solid var(--gold);' : ''}">
-      <span>${i+1}. ${escapeHtml(q.q)}${q.note ? ' <span class="dim" style="font-size:11px;" title="Notu var">📝</span>' : ''}</span>
+      <span>${i+1}. ${escapeHtml(q.q)}${q.note ? ' <span class="dim" style="font-size:11px;" title="Notu var">📝</span>' : ''}${q.difficulty ? ` <span class="dim" style="font-size:10px;">[${DIFFICULTY_LABELS[q.difficulty]||q.difficulty}]</span>` : ''}</span>
       <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;">
         <button class="muted-link" onclick="cqApp.editDraftQuestion(${i})">Düzenle</button>
         <button class="small-x" onclick="cqApp.removeDraftQuestion(${i})">✕</button>
@@ -1533,6 +1597,11 @@ function hostSetupView(){
         <input type="radio" name="draftCorrect" value="3" ${editQ && editQ.correct===3 ? 'checked' : ''}></div>
       <p style="font-size:12px;margin:2px 0 12px;">İşaretli radyo butonu doğru cevabı gösterir.</p>
       <textarea id="draftNote" placeholder="Bu soruyla ilgili yöneticiye özel not (opsiyonel — cevabı gösterdiğinde sana gösterilir, katılımcılar görmez)" style="width:100%;background:var(--surface-2);border:1px solid rgba(255,255,255,0.1);color:var(--text);border-radius:12px;padding:13px 14px;font-size:14px;font-family:var(--font-body);margin-bottom:10px;min-height:70px;resize:vertical;">${editQ && editQ.note ? escapeHtml(editQ.note) : ''}</textarea>
+      <div class="dim" style="margin-bottom:10px;">Zorluk: <select id="draftDifficulty" style="background:var(--surface-2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:6px 10px;">
+        <option value="kolay" ${editQ && editQ.difficulty==='kolay' ? 'selected' : ''}>Kolay</option>
+        <option value="orta" ${!editQ || !editQ.difficulty || editQ.difficulty==='orta' ? 'selected' : ''}>Orta</option>
+        <option value="zor" ${editQ && editQ.difficulty==='zor' ? 'selected' : ''}>Zor</option>
+      </select></div>
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="cqApp.addDraftQuestion()">${editQ ? '✓ Güncelle' : '+ Soruyu Ekle'}</button>
@@ -1566,7 +1635,7 @@ function hostLiveView(){
 
   const partRows = pList.map(p => `
     <div class="row">
-      <span>${escapeHtml(p.name)}</span>
+      <span>${escapeHtml(p.name)} <button class="muted-link" style="font-size:11px;" onclick="cqApp.renameParticipant('${p.id}','${escapeHtml(p.name).replace(/'/g,"\\'")}')">✎</button></span>
       <span style="font-size:12px;color:${answeredSet[p.id] ? 'var(--lime)' : 'var(--text-dim)'};">${answeredSet[p.id] ? '✓ Cevapladı' : '⏳ Bekleniyor'}</span>
     </div>
   `).join('');
@@ -1579,7 +1648,7 @@ function hostLiveView(){
 
   const optsHtml = q.options.map((o,i)=>`
     <div class="answer-tile a${i}" style="min-height:auto;padding:12px 14px;cursor:default;">
-      ${SHAPES[i]}<span>${escapeHtml(o)}</span>
+      <span style="font-weight:800;opacity:.7;">${OPTION_LETTERS[i]}</span>${SHAPES[i]}<span>${escapeHtml(o)}</span>
       ${state.quiz.revealed && i === q.correct ? '<span style="margin-left:auto;">✓</span>' : ''}
     </div>
   `).join('');
@@ -1660,7 +1729,7 @@ function hostResultsView(){
     const blank = Math.max(0, total - (r.answeredCount||0));
     return `
     <div class="leaderboard-row">
-      <span class="rank">${i+1}</span>
+      <span class="rank" style="font-size:${i<3?"18px":"14px"};">${rankBadge(i)}</span>
       <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
       <span class="sc">${r.score} p</span>
     </div>
@@ -1707,24 +1776,27 @@ function hostResultsView(){
 function participantResultsView(){
   const title = state.quiz ? (state.quiz.title || ('Oturum ' + state.code)) : 'Sonuçlar';
   const total = state.quiz && state.quiz.questions ? state.quiz.questions.length : 0;
+  const myIdx = (state.leaderboard||[]).findIndex(x=>x.name===state.name);
   const rows = (state.leaderboard || []).map((r,i)=>{
     const c = r.correctCount || 0;
     const wrong = Math.max(0, (r.answeredCount||0) - c);
     const blank = Math.max(0, total - (r.answeredCount||0));
-    const isMe = r.name === state.name && i === (state.leaderboard||[]).findIndex(x=>x.name===state.name);
+    const isMe = i === myIdx;
     return `
     <div class="leaderboard-row" style="${isMe ? 'outline:2px solid var(--lime);' : ''}">
-      <span class="rank">${i+1}</span>
+      <span class="rank" style="font-size:${i<3?"18px":"14px"};">${rankBadge(i)}</span>
       <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
       <span class="sc">${r.score} p</span>
     </div>
   `;}).join('');
+  const myScore = myIdx >= 0 ? state.leaderboard[myIdx].score : null;
   return `
     <div class="top-bar"><span></span></div>
     <div class="eyebrow">${escapeHtml(title)}</div>
     <h2>Oturum Sona Erdi — Sonuçlar</h2>
     <div class="card">${rows || '<p>Kayıtlı sonuç yok.</p>'}</div>
-    <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
+    ${myIdx >= 0 ? `<button class="btn btn-secondary" onclick="cqApp.shareMyResult(${myIdx+1}, ${myScore})">📤 Sonucumu Paylaş</button>` : ''}
+    <button class="btn btn-secondary" style="margin-top:8px;" onclick="cqApp.goHome()">Ana Sayfa</button>
   `;
 }
 
@@ -1845,7 +1917,7 @@ function participantLiveView(){
     const disabled = state.answeredThisQ || revealed || timeUp;
     let extraClass = '';
     if(revealed && i === q.correct) extraClass = 'correct-flash';
-    return `<button class="answer-tile a${i} ${extraClass}" ${disabled?'disabled':''} onclick="cqApp.submitAnswer(${i})">${SHAPES[i]}<span>${escapeHtml(o)}</span></button>`;
+    return `<button class="answer-tile a${i} ${extraClass}" ${disabled?'disabled':''} onclick="cqApp.submitAnswer(${i})"><span style="font-weight:800;opacity:.7;">${OPTION_LETTERS[i]}</span>${SHAPES[i]}<span>${escapeHtml(o)}</span></button>`;
   }).join('');
 
   let banner = '';
@@ -1870,7 +1942,7 @@ function participantLiveView(){
       const blank = Math.max(0, askedSoFar - (r.answeredCount||0));
       return `
       <div class="leaderboard-row" style="${isMe ? 'outline:2px solid var(--lime);' : ''}">
-        <span class="rank">${i+1}</span>
+        <span class="rank" style="font-size:${i<3?"18px":"14px"};">${rankBadge(i)}</span>
         <span class="nm">${escapeHtml(r.name)}<br><span style="font-size:11px;color:var(--text-dim);">${c} doğru · ${wrong} yanlış · ${blank} boş</span></span>
         <span class="sc">${r.score} p</span>
       </div>`;
@@ -1910,7 +1982,8 @@ window.cqApp = {
   startQuestion, openManagePanel, manageSession, manageResults,
   setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow,
   doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount,
-  toggleSurvey, setSurveyQuestion, submitSurvey, finishSession
+  toggleSurvey, setSurveyQuestion, submitSurvey, finishSession,
+  renameParticipant, shareMyResult, reportIssue
 };
 
 render();
