@@ -381,11 +381,16 @@ setInterval(function(){
 
 function shareMyResult(rank, score){
   const title = state.quiz ? (state.quiz.title || 'Canlı Quiz') : 'Canlı Quiz';
-  const text = '"' + title + '" oturumunda ' + rank + '. sırada bitirdim, ' + score + ' puan aldım! 🎉';
+  const link = window.location.origin + window.location.pathname;
+  const text =
+    '🎯 K-tech Eğitim Platformu\'nda "' + title + '" değerlendirmesini tamamladım — ' +
+    rank + '. sırada bitirdim, ' + score + ' puan aldım! 🏆\n\n' +
+    '🚀 Sen de gelişimine yatırım yap: K-tech ile eğitimlere katıl, bilgini canlı testlerle ölç.\n' +
+    '🎁 Yeni kayıt olanlara ilk 3 etkinlik ÜCRETSİZ!';
   if(navigator.share){
-    navigator.share({ text: text }).catch(function(){});
+    navigator.share({ title: 'K-tech Eğitim Platformu', text: text, url: link }).catch(function(){});
   } else {
-    const url = 'https://www.linkedin.com/sharing/share-offsite/?url=' + encodeURIComponent(window.location.origin) + '&summary=' + encodeURIComponent(text);
+    const url = 'https://www.linkedin.com/sharing/share-offsite/?url=' + encodeURIComponent(link) + '&summary=' + encodeURIComponent(text);
     window.open(url, '_blank');
   }
 }
