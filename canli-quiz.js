@@ -308,6 +308,8 @@ let state = {
   pendingAdmins: null,
   pendingAfterLogin: 'setup',
   detailReport: null,
+  myHistory: null,
+  myHistoryDetail: null,
   prefillCode: urlCode
 };
 
@@ -1108,6 +1110,60 @@ async function loadLeaderboard(){
   }
 }
 
+// Katılımcının bu cihazdan katıldığı geçmiş oturumları listeler; silinmiş olanları da işaretler
+async function openMyHistory(){
+  state.view = 'my-history';
+  state.myHistory = null;
+  render();
+  const list = getJoinHistory();
+  const results = [];
+  for(const h of list){
+    try{
+      const snap = await db.collection('quizzes').doc(h.code).get();
+      results.push({ ...h, exists: snap.exists, quiz: snap.exists ? snap.data() : null });
+    }catch(e){
+      results.push({ ...h, exists: false, quiz: null });
+    }
+  }
+  state.myHistory = results;
+  render();
+}
+
+// Belirli bir geçmiş oturumdaki sırasını, puanını ve tüm cevaplarını getirir
+async function openMyHistoryDetail(code){
+  const list = getJoinHistory();
+  const h = list.find(x => x.code === code);
+  if(!h) return;
+  state.view = 'my-history-detail';
+  state.myHistoryDetail = null;
+  render();
+  try{
+    const quizSnap = await db.collection('quizzes').doc(code).get();
+    if(!quizSnap.exists){
+      state.myHistoryDetail = { code, notFound: true };
+      render();
+      return;
+    }
+    const quiz = quizSnap.data();
+    const leaderboard = await buildLeaderboard(code);
+    const rankIdx = leaderboard.findIndex(r => r.name === h.name);
+    const ansSnap = await db.collection('quizzes').doc(code).collection('answers')
+      .where('participantId', '==', h.participantId).get();
+    const answersByQ = {};
+    ansSnap.forEach(d => { const a = d.data(); answersByQ[a.qIndex] = a; });
+    state.myHistoryDetail = {
+      code, quiz, name: h.name,
+      rank: rankIdx >= 0 ? rankIdx + 1 : null,
+      score: rankIdx >= 0 ? leaderboard[rankIdx].score : 0,
+      total: leaderboard.length,
+      answersByQ
+    };
+  }catch(e){
+    state.myHistoryDetail = { code, error: true };
+  }
+  render();
+}
+
 function startJoinFlow(){
   state.view = 'join';
   state.errorMsg = '';
@@ -1119,6 +1175,26 @@ function getStoredParticipantId(code){
 }
 function storeParticipantId(code, pid){
   try{ localStorage.setItem('cqz_pid_' + code, pid); }catch(e){}
+}
+
+// Katıldığı oturumları bu cihazda hatırlamak için yerel geçmiş listesi
+function recordJoinHistory(code, title){
+  try{
+    const raw = localStorage.getItem('cqz_history');
+    let list = raw ? JSON.parse(raw) : [];
+    list = list.filter(h => h.code !== code);
+    list.unshift({ code: code, title: title || ('Oturum ' + code), participantId: state.participantId, name: state.name, joinedAt: Date.now() });
+    if(list.length > 50) list = list.slice(0, 50);
+    localStorage.setItem('cqz_history', JSON.stringify(list));
+  }catch(e){}
+}
+function getJoinHistory(){
+  try{
+    const raw = localStorage.getItem('cqz_history');
+    return raw ? JSON.parse(raw) : [];
+  }catch(e){
+    return [];
+  }
 }
 
 async function joinSession(){
@@ -1174,6 +1250,7 @@ async function joinSession(){
     }
     state.errorMsg = '';
     state.view = 'participant-results';
+    recordJoinHistory(code, state.quiz.title);
     render();
     return;
   }
@@ -1252,6 +1329,7 @@ async function joinSession(){
 
   state.errorMsg = '';
   state.view = 'participant-live';
+  recordJoinHistory(code, state.quiz.title);
   render();
   subscribeParticipant();
   subscribeHostParticipants();
@@ -1408,6 +1486,8 @@ function viewFor(view){
     case 'participant-results': return participantResultsView();
     case 'survey': return surveyView();
     case 'host-survey': return hostSurveyView();
+    case 'my-history': return myHistoryView();
+    case 'my-history-detail': return myHistoryDetailView();
     default: return homeView();
   }
 }
@@ -1455,6 +1535,84 @@ function registerDoneView(){
   `;
 }
 
+function myHistoryView(){
+  if(state.myHistory === null){
+    return `<div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
+  }
+  if(state.myHistory.length === 0){
+    return `
+      <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div>
+      <div class="eyebrow">Geçmiş Oturumlarım</div>
+      <h2>Henüz katıldığın bir oturum yok</h2>
+      <p class="dim">Bir oturuma katıldığında burada listelenecek. Not: bu liste, sadece kullandığın bu cihazda/tarayıcıda tutulur.</p>
+    `;
+  }
+  const deletedCount = state.myHistory.filter(h => !h.exists).length;
+  const rows = state.myHistory.map(h => {
+    if(!h.exists){
+      return `
+      <div class="qlist-item">
+        <span>${escapeHtml(h.title)}<br><span class="dim" style="font-size:11px;">Kod: ${h.code} · ${fmtDate(h.joinedAt)}</span></span>
+        <span style="font-size:12px;color:var(--coral);">🗑 Silinmiş</span>
+      </div>`;
+    }
+    const status = h.quiz.ended ? 'Bitti' : (h.quiz.started ? 'Devam Ediyor' : 'Lobide Bekliyor');
+    return `
+    <div class="qlist-item">
+      <span>${escapeHtml(h.title)}<br><span class="dim" style="font-size:11px;">Kod: ${h.code} · ${fmtDate(h.joinedAt)} · ${status}</span></span>
+      <button class="muted-link" onclick="cqApp.openMyHistoryDetail('${h.code}')">Sonucumu Gör</button>
+    </div>`;
+  }).join('');
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div>
+    <div class="eyebrow">Geçmiş Oturumlarım</div>
+    <h2>Katıldığın oturumlar</h2>
+    ${deletedCount > 0 ? `<div class="card" style="border:1px solid var(--coral);"><p style="margin:0;font-size:13px;">⚠️ Geçmişindeki ${deletedCount} oturum artık mevcut değil — yönetici tarafından silinmiş olabilir.</p></div>` : ''}
+    <div class="card">${rows}</div>
+    <p class="dim" style="font-size:11px;text-align:center;">Bu liste yalnızca bu cihazda/tarayıcıda saklanır.</p>
+  `;
+}
+
+function myHistoryDetailView(){
+  const d = state.myHistoryDetail;
+  if(!d){
+    return `<div class="top-bar"><button class="muted-link" onclick="cqApp.openMyHistory()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
+  }
+  if(d.notFound){
+    return `
+      <div class="top-bar"><button class="muted-link" onclick="cqApp.openMyHistory()">← Geri</button></div>
+      <div class="card"><p>🗑 Bu oturum artık mevcut değil — silinmiş olabilir.</p></div>
+    `;
+  }
+  if(d.error){
+    return `
+      <div class="top-bar"><button class="muted-link" onclick="cqApp.openMyHistory()">← Geri</button></div>
+      <div class="card"><p>Sonuçlar yüklenemedi, tekrar dener misin?</p></div>
+    `;
+  }
+  const qRows = (d.quiz.questions || []).map((q,i) => {
+    const a = d.answersByQ[i];
+    if(!a){
+      return `<div class="row"><span class="dim">S${i+1}: ${escapeHtml(q.q)}</span><span class="dim">Cevap yok</span></div>`;
+    }
+    const choiceText = q.options && q.options[a.choice] !== undefined ? q.options[a.choice] : '?';
+    const mark = a.correct ? '✓' : '✗';
+    const color = a.correct ? 'var(--lime)' : 'var(--coral)';
+    return `<div class="row"><span class="dim">S${i+1}: ${escapeHtml(q.q)}</span><span style="color:${color};font-size:13px;">${mark} ${escapeHtml(choiceText)} (${a.points||0}p)</span></div>`;
+  }).join('');
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.openMyHistory()">← Geri</button></div>
+    <div class="eyebrow">${escapeHtml(d.quiz.title || ('Oturum ' + d.code))}</div>
+    <h2>Sonucun</h2>
+    <div class="card" style="text-align:center;">
+      <p style="font-size:32px;font-weight:800;color:var(--lime);margin:4px 0;">${d.rank ? rankBadge(d.rank-1) : '—'}</p>
+      <p class="dim">${d.total} kişi içinde ${d.rank ? d.rank + '. sıra' : 'sıralama yok'}</p>
+      <p style="font-size:22px;font-weight:800;margin:6px 0;">${d.score} puan</p>
+    </div>
+    <div class="card"><h3 style="font-size:15px;">Verdiğin Cevaplar</h3>${qRows || '<p class="dim">Cevap kaydı yok.</p>'}</div>
+  `;
+}
+
 function homeView(){
   return `
     <div class="eyebrow">Canlı Quiz</div>
@@ -1473,6 +1631,7 @@ function homeView(){
       </div>
     </div>
     <button class="muted-link" style="display:block;margin:14px auto 0;" onclick="cqApp.openManagePanel()">📋 Oturumlarımı Yönet</button>
+    <button class="muted-link" style="display:block;margin:8px auto 0;" onclick="cqApp.openMyHistory()">📜 Geçmiş Oturumlarım (Katılımcı)</button>
     <button class="muted-link" style="display:block;margin:8px auto 0;" onclick="cqApp.reportIssue()">🐞 Sorun Bildir</button>
   `;
 }
@@ -1988,7 +2147,8 @@ window.cqApp = {
   setDraftTitle, renameSession, deleteSession, openDetailReport, endSessionNow,
   doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount,
   toggleSurvey, setSurveyQuestion, submitSurvey, finishSession,
-  renameParticipant, shareMyResult, reportIssue
+  renameParticipant, shareMyResult, reportIssue,
+  openMyHistory, openMyHistoryDetail
 };
 
 render();
