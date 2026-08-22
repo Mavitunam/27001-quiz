@@ -178,7 +178,8 @@
     .then(function(){
       return Promise.all([
         loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js'),
-        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js')
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js'),
+        loadScript('https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-functions-compat.js')
       ]);
     })
     .then(function(){
@@ -203,6 +204,7 @@ const firebaseConfig = {
 const fbApp = firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const auth = firebase.auth();
+const cloudFns = firebase.functions();
 
 const QUESTION_SECONDS = 30;
 
@@ -310,6 +312,10 @@ let state = {
   detailReport: null,
   myHistory: null,
   myHistoryDetail: null,
+  myAiCredits: 0,
+  myAiSubUntil: 0,
+  aiGenerating: false,
+  aiError: '',
   prefillCode: urlCode
 };
 
@@ -567,9 +573,81 @@ async function enterSetup(){
   state.activeTemplateTitle = '';
   state.surveyEnabled = false;
   state.draftSurveyQuestions = DEFAULT_SURVEY_QUESTIONS.slice();
+  state.aiError = '';
   render();
   await loadTemplates();
+  await refreshMyAiCredits();
   render();
+}
+
+async function refreshMyAiCredits(){
+  if(isSuperAdmin()){
+    state.myAiCredits = Infinity;
+    state.myAiSubUntil = Infinity;
+    return;
+  }
+  try{
+    const snap = await db.collection('admins').doc(auth.currentUser.uid).get();
+    const d = snap.exists ? snap.data() : {};
+    state.myAiCredits = d.aiCredits || 0;
+    state.myAiSubUntil = d.aiSubscriptionUntil || 0;
+  }catch(e){
+    state.myAiCredits = 0;
+    state.myAiSubUntil = 0;
+  }
+}
+
+function hasAiAccess(){
+  if(isSuperAdmin()) return true;
+  if(state.myAiSubUntil && state.myAiSubUntil > Date.now()) return true;
+  return (state.myAiCredits || 0) > 0;
+}
+
+async function generateAiQuestions(){
+  const topicEl = document.getElementById('aiTopic');
+  const countEl = document.getElementById('aiCount');
+  const diffEl = document.getElementById('aiDifficulty');
+  const topic = topicEl ? topicEl.value.trim() : '';
+  const count = countEl ? (parseInt(countEl.value, 10) || 5) : 5;
+  const difficulty = diffEl ? diffEl.value : 'orta';
+
+  if(!topic){
+    state.aiError = 'Lütfen bir konu yaz (örn. "İş sağlığı ve güvenliği temel kuralları").';
+    render();
+    return;
+  }
+  if(!hasAiAccess()){
+    state.aiError = 'Yapay zeka ile soru üretme kredin/aboneliğin yok. Yönetici (süper admin) ile iletişime geç.';
+    render();
+    return;
+  }
+
+  state.aiGenerating = true;
+  state.aiError = '';
+  render();
+
+  try{
+    const fn = cloudFns.httpsCallable('generateAiQuestions');
+    const res = await fn({ topic, count, difficulty });
+    const newQs = (res.data && res.data.questions ? res.data.questions : []).map(q => ({
+      q: q.q, options: q.options, correct: q.correct, difficulty: q.difficulty || difficulty, note: ''
+    }));
+    if(newQs.length === 0){
+      state.aiError = 'Yapay zeka soru üretemedi, farklı bir konuyla tekrar dener misin?';
+    } else {
+      state.draftQuestions = state.draftQuestions.concat(newQs);
+      if(topicEl) topicEl.value = '';
+    }
+    state.aiGenerating = false;
+    render();
+    await syncActiveTemplate();
+    await refreshMyAiCredits();
+    render();
+  }catch(e){
+    state.aiGenerating = false;
+    state.aiError = (e && e.message) ? e.message : 'Üretilemedi, tekrar dener misin?';
+    render();
+  }
 }
 
 function toggleSurvey(){
@@ -643,6 +721,33 @@ async function rejectAdmin(uid){
     render();
   }catch(e){
     alert('Silinemedi, tekrar dener misin?');
+  }
+}
+
+async function addAiCredits(uid, amount){
+  try{
+    await db.collection('admins').doc(uid).update({
+      aiCredits: firebase.firestore.FieldValue.increment(amount)
+    });
+    const a = (state.pendingAdmins||[]).find(x => x.uid === uid);
+    if(a) a.aiCredits = (a.aiCredits || 0) + amount;
+    render();
+  }catch(e){
+    alert('Kredi eklenemedi, tekrar dener misin?');
+  }
+}
+
+async function grantAiSubscription(uid){
+  const days = prompt('Kaç gün abonelik verilsin?', '30');
+  if(!days || isNaN(parseInt(days,10))) return;
+  const until = Date.now() + parseInt(days,10) * 86400000;
+  try{
+    await db.collection('admins').doc(uid).update({ aiSubscriptionUntil: until });
+    const a = (state.pendingAdmins||[]).find(x => x.uid === uid);
+    if(a) a.aiSubscriptionUntil = until;
+    render();
+  }catch(e){
+    alert('Abonelik verilemedi, tekrar dener misin?');
   }
 }
 
@@ -1681,10 +1786,26 @@ function manageView(){
         </div>
       </div>
     `).join('');
-    const approvedRows = approved.map(a => `
-      <div class="row"><span>${escapeHtml(a.name || a.email)} <span class="dim">(${escapeHtml(a.email)})</span></span>
-      <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')" title="Erişimi kaldır">✕</button></div>
-    `).join('');
+    const approvedRows = approved.map(a => {
+      const subActive = a.aiSubscriptionUntil && a.aiSubscriptionUntil > Date.now();
+      const subLabel = subActive ? ('Abonelik: ' + fmtDate(a.aiSubscriptionUntil) + ' tarihine kadar') : 'Abonelik yok';
+      return `
+      <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+        <div class="row" style="margin-bottom:4px;">
+          <span>${escapeHtml(a.name || a.email)} <span class="dim">(${escapeHtml(a.email)})</span></span>
+          <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')" title="Erişimi kaldır">✕</button>
+        </div>
+        <div class="row" style="margin-bottom:6px;">
+          <span class="dim" style="font-size:12px;">✨ AI Kredisi: ${a.aiCredits || 0}</span>
+          <span class="dim" style="font-size:11px;">${subLabel}</span>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 10)">+10 Kredi</button>
+          <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 50)">+50 Kredi</button>
+          <button class="btn btn-secondary" onclick="cqApp.grantAiSubscription('${a.uid}')">📅 30 Gün Abonelik Ver</button>
+        </div>
+      </div>
+    `;}).join('');
     pendingSection = `
       <div class="card">
         <h3 style="font-size:15px;">Bekleyen Onaylar (${pending.length})</h3>
@@ -1743,6 +1864,24 @@ function hostSetupView(){
     ${state.activeTemplateId ? `<div class="status-pill">🔗 "${escapeHtml(state.activeTemplateTitle)}" şablonuna bağlı — değişiklikler otomatik kaydedilir</div>` : ''}
     <div class="card">
       <input type="text" id="draftTitle" placeholder="Oturum adı (örn. Yangın Güvenliği Eğitimi)" value="${escapeHtml(state.draftTitle || '')}" oninput="cqApp.setDraftTitle(this.value)">
+    </div>
+    <div class="card">
+      <div class="row">
+        <h3 style="font-size:15px;margin:0;">✨ Yapay Zeka ile Soru Üret</h3>
+        <span class="dim" style="font-size:12px;">${isSuperAdmin() ? 'Sınırsız (süper admin)' : (state.myAiSubUntil > Date.now() ? 'Abonelik aktif ✓' : (state.myAiCredits || 0) + ' kredi')}</span>
+      </div>
+      <input type="text" id="aiTopic" placeholder="Konu (örn. İş Sağlığı ve Güvenliği Temel Kuralları)">
+      <div class="qopt" style="justify-content:space-between;">
+        <label class="dim" style="font-size:13px;">Soru sayısı: <input type="number" id="aiCount" value="5" min="1" max="10" style="width:50px;background:transparent;border:none;color:var(--text);"></label>
+        <select id="aiDifficulty" style="background:var(--surface-2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:6px;">
+          <option value="kolay">Kolay</option>
+          <option value="orta" selected>Orta</option>
+          <option value="zor">Zor</option>
+        </select>
+      </div>
+      ${state.aiError ? `<div class="error-msg">${state.aiError}</div>` : ''}
+      <button class="btn btn-secondary" onclick="cqApp.generateAiQuestions()" ${state.aiGenerating ? 'disabled' : ''}>${state.aiGenerating ? '⏳ Üretiliyor…' : '✨ Soruları Üret'}</button>
+      ${!hasAiAccess() ? `<p class="dim" style="font-size:11px;margin-top:6px;">Bu özellik ücretlidir. Kredi/abonelik için süper admin ile iletişime geç.</p>` : ''}
     </div>
     ${templatesSection}
     <div class="card">
@@ -2148,7 +2287,8 @@ window.cqApp = {
   doRegister, showRegisterView, approveAdmin, rejectAdmin, deleteMyAccount,
   toggleSurvey, setSurveyQuestion, submitSurvey, finishSession,
   renameParticipant, shareMyResult, reportIssue,
-  openMyHistory, openMyHistoryDetail
+  openMyHistory, openMyHistoryDetail,
+  generateAiQuestions, addAiCredits, grantAiSubscription
 };
 
 render();
