@@ -217,6 +217,14 @@ const DEFAULT_SURVEY_QUESTIONS = [
 ];
 const SUPERADMIN_EMAIL = 'ktekkol@gmail.com';
 
+// Tüm iletişim mesajlarında kullanılan sabit bilgiler
+const CONTACT_PHONE = '08503048422';
+const CONTACT_EMAIL = 'info@ktech.web.tr';
+// alert()/confirm() gibi düz metin gösterilen yerler için
+const CONTACT_TEXT = CONTACT_PHONE + ' veya ' + CONTACT_EMAIL;
+// HTML gösterilen yerler için tıklanabilir sürüm
+const CONTACT_HTML = '<a href="tel:' + CONTACT_PHONE + '" style="color:var(--lime);">' + CONTACT_PHONE + '</a> veya <a href="mailto:' + CONTACT_EMAIL + '" style="color:var(--lime);">' + CONTACT_EMAIL + '</a>';
+
 // --- EmailJS ayarları (e-posta bildirimleri için) ---
 // emailjs.com üzerinden ücretsiz hesap açıp bu 4 değeri kendi bilgilerinle değiştir.
 const EMAILJS_PUBLIC_KEY = 'WcQLdX361FDPGtmS4';
@@ -302,12 +310,14 @@ let state = {
   unsubQuiz: null,
   unsubAnswers: null,
   templates: [],
+  sharedTemplates: [],
   templatesLoaded: false,
   unsubParticipants: null,
   participantsList: [],
   answeredPids: null,
   mySessions: null,
   pendingAdmins: null,
+  allTemplatesForSuperAdmin: null,
   pendingAfterLogin: 'setup',
   detailReport: null,
   myHistory: null,
@@ -617,7 +627,7 @@ async function generateAiQuestions(){
     return;
   }
   if(!hasAiAccess()){
-    state.aiError = 'Yapay zeka ile soru üretme kredin/aboneliğin yok. Yönetici (süper admin) ile iletişime geç.';
+    state.aiError = 'Yapay zeka ile soru üretme kredin/aboneliğin yok. Kredi/abonelik için ' + CONTACT_TEXT + ' ile iletişime geçebilirsiniz.';
     render();
     return;
   }
@@ -645,7 +655,7 @@ async function generateAiQuestions(){
     render();
   }catch(e){
     state.aiGenerating = false;
-    state.aiError = (e && e.message) ? e.message : 'Üretilemedi, tekrar dener misin?';
+    state.aiError = (e && e.code ? '[' + e.code + '] ' : '') + ((e && e.message) ? e.message : 'Üretilemedi, tekrar dener misin?');
     render();
   }
 }
@@ -692,6 +702,15 @@ async function enterManage(){
     }catch(e){
       state.pendingAdmins = [];
     }
+    try{
+      const tplSnap = await db.collection('templates').where('hiddenFromSuperAdmin', '==', false).get();
+      const tlist = [];
+      tplSnap.forEach(d => tlist.push({ id: d.id, ...d.data(), expanded: false }));
+      tlist.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      state.allTemplatesForSuperAdmin = tlist;
+    }catch(e){
+      state.allTemplatesForSuperAdmin = [];
+    }
   }
   render();
 }
@@ -722,6 +741,12 @@ async function rejectAdmin(uid){
   }catch(e){
     alert('Silinemedi, tekrar dener misin?');
   }
+}
+
+function toggleTemplateDetail(id){
+  const t = (state.allTemplatesForSuperAdmin||[]).find(x => x.id === id);
+  if(t) t.expanded = !t.expanded;
+  render();
 }
 
 async function addAiCredits(uid, amount){
@@ -831,6 +856,27 @@ async function deleteQuizCascade(code){
 // admin kaydı + giriş hesabının kendisi kalıcı olarak silinir.
 async function deleteMyAccount(){
   if(!auth.currentUser) return;
+
+  // Kullanılmamış AI kredisi ya da aktif abonelik varsa silme işlemine izin verme
+  if(!isSuperAdmin()){
+    try{
+      const snap = await db.collection('admins').doc(auth.currentUser.uid).get();
+      const d = snap.exists ? snap.data() : {};
+      const credits = d.aiCredits || 0;
+      const subActive = d.aiSubscriptionUntil && d.aiSubscriptionUntil > Date.now();
+      if(credits > 0 || subActive){
+        let msg = 'Hesabında kullanılmamış hakların var: ';
+        const parts = [];
+        if(credits > 0) parts.push(credits + ' AI kredisi');
+        if(subActive) parts.push('aktif abonelik (' + fmtDate(d.aiSubscriptionUntil) + ' tarihine kadar)');
+        msg += parts.join(' ve ') + '.\n\nHesabını silmeden önce bu hakları kullanmalısın. ' +
+          'Kalan hakların iptali için ' + CONTACT_TEXT + ' ile iletişime geçebilirsiniz.';
+        alert(msg);
+        return;
+      }
+    }catch(e){}
+  }
+
   const sure = confirm(
     'Hesabını silmek üzeresin.\n\n' +
     'Bu işlem, oluşturduğun TÜM oturumları, cevapları ve kayıtlı soru şablonlarını ' +
@@ -870,7 +916,7 @@ async function deleteMyAccount(){
     alert('"' + deletedEmail + '" hesabı ve tüm verileri kalıcı olarak silindi.');
     leaveSession();
   }catch(e){
-    alert('Hesap silinirken bir sorun oluştu. Bazı veriler silinmiş olabilir — lütfen bizimle iletişime geç.');
+    alert('Hesap silinirken bir sorun oluştu. Bazı veriler silinmiş olabilir — lütfen ' + CONTACT_TEXT + ' ile iletişime geçin.');
     console.error(e);
   }
 }
@@ -903,13 +949,26 @@ async function openDetailReport(code){
 
 async function loadTemplates(){
   try{
-    const snap = await db.collection('templates').where('createdBy', '==', auth.currentUser.uid).get();
+    const [ownSnap, sharedSnap] = await Promise.all([
+      db.collection('templates').where('createdBy', '==', auth.currentUser.uid).get(),
+      db.collection('templates').where('sharedWithAdmins', '==', true).get()
+    ]);
     const list = [];
-    snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+    ownSnap.forEach(d => list.push({ id: d.id, ...d.data() }));
     list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
     state.templates = list;
+
+    const shared = [];
+    sharedSnap.forEach(d => {
+      if(d.data().createdBy !== auth.currentUser.uid){
+        shared.push({ id: d.id, ...d.data() });
+      }
+    });
+    shared.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    state.sharedTemplates = shared;
   }catch(e){
     state.templates = [];
+    state.sharedTemplates = [];
   }
   state.templatesLoaded = true;
 }
@@ -936,6 +995,9 @@ async function saveTemplate(){
       title: title.trim(),
       questions: state.draftQuestions,
       createdBy: auth.currentUser.uid,
+      createdByEmail: auth.currentUser.email,
+      sharedWithAdmins: false,
+      hiddenFromSuperAdmin: false,
       createdAt: Date.now()
     });
     state.activeTemplateId = docRef.id;
@@ -948,20 +1010,57 @@ async function saveTemplate(){
 }
 
 function useTemplate(id){
-  const t = state.templates.find(t => t.id === id);
+  const t = state.templates.find(t => t.id === id) || (state.sharedTemplates||[]).find(t => t.id === id);
   if(!t) return;
   state.draftQuestions = JSON.parse(JSON.stringify(t.questions));
   if(!state.draftTitle) state.draftTitle = t.title;
-  state.activeTemplateId = id;
+  // Başkasının paylaştığı şablonu kullanıyorsan, otomatik-senkron sadece kendi şablonların için geçerli
+  state.activeTemplateId = (t.createdBy === auth.currentUser.uid) ? id : null;
   state.activeTemplateTitle = t.title;
   state.errorMsg = '';
   render();
 }
 
+async function toggleTemplateShare(id){
+  const t = state.templates.find(x => x.id === id);
+  if(!t) return;
+  const newVal = !t.sharedWithAdmins;
+  try{
+    await db.collection('templates').doc(id).update({ sharedWithAdmins: newVal });
+    t.sharedWithAdmins = newVal;
+    render();
+  }catch(e){
+    alert('Güncellenemedi, tekrar dener misin?');
+  }
+}
+
+async function toggleTemplateHidden(id){
+  const t = state.templates.find(x => x.id === id);
+  if(!t) return;
+  const newVal = !t.hiddenFromSuperAdmin;
+  try{
+    await db.collection('templates').doc(id).update({ hiddenFromSuperAdmin: newVal });
+    t.hiddenFromSuperAdmin = newVal;
+    // Sayısal sayaç: içerik gizli kalır, sadece "kaç tane gizli şablonu var" bilgisi süper adminle paylaşılır
+    await db.collection('admins').doc(auth.currentUser.uid).update({
+      hiddenTemplateCount: firebase.firestore.FieldValue.increment(newVal ? 1 : -1)
+    });
+    render();
+  }catch(e){
+    alert('Güncellenemedi, tekrar dener misin?');
+  }
+}
+
 async function deleteTemplate(id){
   if(!confirm('Bu kayıtlı soru seti silinsin mi? Bu işlem geri alınamaz.')) return;
+  const t = state.templates.find(x => x.id === id);
   try{
     await db.collection('templates').doc(id).delete();
+    if(t && t.hiddenFromSuperAdmin){
+      await db.collection('admins').doc(auth.currentUser.uid).update({
+        hiddenTemplateCount: firebase.firestore.FieldValue.increment(-1)
+      });
+    }
     if(state.activeTemplateId === id){
       state.activeTemplateId = null;
       state.activeTemplateTitle = '';
@@ -1799,6 +1898,9 @@ function manageView(){
           <span class="dim" style="font-size:12px;">✨ AI Kredisi: ${a.aiCredits || 0}</span>
           <span class="dim" style="font-size:11px;">${subLabel}</span>
         </div>
+        <div class="row" style="margin-bottom:6px;">
+          <span class="dim" style="font-size:12px;">🔒 Gizli şablon sayısı: ${a.hiddenTemplateCount || 0}</span>
+        </div>
         <div class="btn-row">
           <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 10)">+10 Kredi</button>
           <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 50)">+50 Kredi</button>
@@ -1812,6 +1914,24 @@ function manageView(){
         ${pending.length ? pendingRows : '<p class="dim" style="font-size:13px;">Bekleyen kayıt yok.</p>'}
       </div>
       ${approved.length ? `<div class="card"><h3 style="font-size:15px;">Onaylı Yöneticiler (${approved.length})</h3>${approvedRows}</div>` : ''}
+    `;
+
+    const tplList = state.allTemplatesForSuperAdmin || [];
+    const tplRows = tplList.map(t => `
+      <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+        <div class="row">
+          <span>${escapeHtml(t.title)} <span class="dim" style="font-size:11px;">· ${(t.questions||[]).length} soru · ${escapeHtml(t.createdByEmail || 'bilinmiyor')}${t.sharedWithAdmins ? ' · 🌐 paylaşılıyor' : ''}</span></span>
+          <button class="muted-link" onclick="cqApp.toggleTemplateDetail('${t.id}')">${t.expanded ? 'Gizle' : 'Soruları Gör'}</button>
+        </div>
+        ${t.expanded ? `<div style="margin-top:8px;">${(t.questions||[]).map((q,i)=>`<p class="dim" style="font-size:12px;margin:4px 0;">${i+1}. ${escapeHtml(q.q)}</p>`).join('')}</div>` : ''}
+      </div>
+    `).join('');
+    pendingSection += `
+      <div class="card">
+        <h3 style="font-size:15px;">📋 Tüm Kayıtlı Şablonlar (${tplList.length})</h3>
+        <p class="dim" style="font-size:11px;">Yöneticilerin "süper adminden gizle" işaretlemediği şablonlar burada listelenir. Gizlenen şablonlar bu listede hiç görünmez.</p>
+        ${tplList.length ? tplRows : '<p class="dim" style="font-size:13px;">Görüntülenebilir şablon yok.</p>'}
+      </div>
     `;
   }
 
@@ -1841,20 +1961,42 @@ function hostSetupView(){
   `).join('');
 
   const templateItems = (state.templates||[]).map(t => `
-    <div class="qlist-item">
-      <span>${escapeHtml(t.title)} <span style="color:var(--text-dim);">· ${(t.questions||[]).length} soru</span></span>
-      <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;">
-        <button class="muted-link" onclick="cqApp.useTemplate('${t.id}')">Kullan</button>
-        <button class="small-x" onclick="cqApp.deleteTemplate('${t.id}')">✕</button>
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row">
+        <span>${escapeHtml(t.title)} <span style="color:var(--text-dim);">· ${(t.questions||[]).length} soru</span></span>
+        <div style="display:flex;gap:10px;align-items:center;flex-shrink:0;">
+          <button class="muted-link" onclick="cqApp.useTemplate('${t.id}')">Kullan</button>
+          <button class="small-x" onclick="cqApp.deleteTemplate('${t.id}')">✕</button>
+        </div>
       </div>
+      <div class="row" style="margin-top:6px;">
+        <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
+          <input type="checkbox" ${t.sharedWithAdmins ? 'checked' : ''} onchange="cqApp.toggleTemplateShare('${t.id}')">
+          🌐 Yöneticilerle paylaş
+        </label>
+        <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
+          <input type="checkbox" ${t.hiddenFromSuperAdmin ? 'checked' : ''} onchange="cqApp.toggleTemplateHidden('${t.id}')">
+          🔒 Süper adminden gizle
+        </label>
+      </div>
+    </div>
+  `).join('');
+
+  const sharedTemplateItems = (state.sharedTemplates||[]).map(t => `
+    <div class="qlist-item">
+      <span>${escapeHtml(t.title)} <span style="color:var(--text-dim);">· ${(t.questions||[]).length} soru · ${escapeHtml(t.createdByEmail || 'bir yönetici')}</span></span>
+      <button class="muted-link" onclick="cqApp.useTemplate('${t.id}')">Kullan</button>
     </div>
   `).join('');
 
   const templatesSection = !state.templatesLoaded
     ? `<div class="card"><p style="margin:0;">Kayıtlı soru setleri yükleniyor…</p></div>`
     : (state.templates && state.templates.length
-        ? `<div class="card"><h3 style="font-size:15px;">Kayıtlı Quizler (${state.templates.length})</h3><p style="font-size:12px;margin-top:-4px;">Önceki eğitimlerden kaydettiğin soru setleri. "Kullan" ile aşağıya yükle.</p>${templateItems}</div>`
+        ? `<div class="card"><h3 style="font-size:15px;">Kayıtlı Quizlerim (${state.templates.length})</h3><p style="font-size:12px;margin-top:-4px;">Önceki eğitimlerden kaydettiğin soru setleri. "Kullan" ile aşağıya yükle.</p>${templateItems}</div>`
         : `<div class="card"><p style="margin:0;">Henüz kayıtlı soru setin yok. Aşağıda soruları hazırlayıp "Şablon Olarak Kaydet" ile eğitimler arası tekrar kullanabilirsin.</p></div>`
+      ) + (state.sharedTemplates && state.sharedTemplates.length
+        ? `<div class="card"><h3 style="font-size:15px;">🌐 Paylaşılan Şablonlar (${state.sharedTemplates.length})</h3><p style="font-size:12px;margin-top:-4px;">Diğer yöneticilerin herkesle paylaştığı soru setleri — kullanarak gereksiz AI maliyetinden kaçınabilirsin.</p>${sharedTemplateItems}</div>`
+        : ''
       );
 
   return `
@@ -1872,7 +2014,7 @@ function hostSetupView(){
       </div>
       <input type="text" id="aiTopic" placeholder="Konu (örn. İş Sağlığı ve Güvenliği Temel Kuralları)">
       <div class="qopt" style="justify-content:space-between;">
-        <label class="dim" style="font-size:13px;">Soru sayısı: <input type="number" id="aiCount" value="5" min="1" max="10" style="width:50px;background:transparent;border:none;color:var(--text);"></label>
+        <label class="dim" style="font-size:13px;display:flex;align-items:center;gap:8px;">Soru sayısı: <input type="number" id="aiCount" value="5" min="1" max="10" style="width:56px;background:var(--surface-2);border:1px solid rgba(255,255,255,0.15);color:var(--text);border-radius:8px;padding:6px 4px;text-align:center;font-size:14px;"></label>
         <select id="aiDifficulty" style="background:var(--surface-2);color:var(--text);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:6px;">
           <option value="kolay">Kolay</option>
           <option value="orta" selected>Orta</option>
@@ -1881,7 +2023,7 @@ function hostSetupView(){
       </div>
       ${state.aiError ? `<div class="error-msg">${state.aiError}</div>` : ''}
       <button class="btn btn-secondary" onclick="cqApp.generateAiQuestions()" ${state.aiGenerating ? 'disabled' : ''}>${state.aiGenerating ? '⏳ Üretiliyor…' : '✨ Soruları Üret'}</button>
-      ${!hasAiAccess() ? `<p class="dim" style="font-size:11px;margin-top:6px;">Bu özellik ücretlidir. Kredi/abonelik için süper admin ile iletişime geç.</p>` : ''}
+      ${!hasAiAccess() ? `<p class="dim" style="font-size:11px;margin-top:6px;">Bu özellik ücretlidir. Kredi/abonelik için ${CONTACT_HTML} ile iletişime geçebilirsiniz.</p>` : ''}
     </div>
     ${templatesSection}
     <div class="card">
@@ -2288,7 +2430,8 @@ window.cqApp = {
   toggleSurvey, setSurveyQuestion, submitSurvey, finishSession,
   renameParticipant, shareMyResult, reportIssue,
   openMyHistory, openMyHistoryDetail,
-  generateAiQuestions, addAiCredits, grantAiSubscription
+  generateAiQuestions, addAiCredits, grantAiSubscription,
+  toggleTemplateShare, toggleTemplateHidden, toggleTemplateDetail
 };
 
 render();
