@@ -297,6 +297,8 @@ let state = {
   activeTemplateTitle: '',
   surveyEnabled: false,
   draftSurveyQuestions: [],
+  draftShareWithAdmins: false,
+  draftHideFromSuperAdmin: false,
   mySurveyAnswer: null,
   surveyResults: null,
   participantId: null,
@@ -375,6 +377,14 @@ function fmtDate(ts){
 
 function setDraftTitle(v){
   state.draftTitle = v;
+}
+
+function setDraftShareWithAdmins(v){
+  state.draftShareWithAdmins = v;
+}
+
+function setDraftHideFromSuperAdmin(v){
+  state.draftHideFromSuperAdmin = v;
 }
 
 function stopListeners(){
@@ -492,11 +502,18 @@ async function doLogin(){
     render();
     return;
   }
-  // Süper admin her zaman onaylı sayılır
+  // Süper admin her zaman onaylı sayılır ve e-posta doğrulaması aranmaz
   if(isSuperAdmin()){
     state.errorMsg = '';
     if(state.pendingAfterLogin === 'manage') await enterManage();
     else await enterSetup();
+    return;
+  }
+  // E-posta doğrulanmadıysa devam ettirme — yanlış/yazım hatalı e-postayla kayıt olmayı engeller
+  if(!auth.currentUser.emailVerified){
+    state.view = 'verify-email';
+    state.errorMsg = '';
+    render();
     return;
   }
   // Diğer herkes için onay durumu kontrol edilir
@@ -519,6 +536,46 @@ async function doLogin(){
   else await enterSetup();
 }
 
+async function resendVerification(){
+  if(!auth.currentUser) return;
+  try{
+    await auth.currentUser.sendEmailVerification();
+    alert('Doğrulama e-postası tekrar gönderildi. Gelen kutunu (ve spam klasörünü) kontrol et.');
+  }catch(e){
+    alert('Gönderilemedi, biraz sonra tekrar dener misin?');
+  }
+}
+
+async function checkVerificationAndProceed(){
+  if(!auth.currentUser) return;
+  try{
+    await auth.currentUser.reload();
+    if(auth.currentUser.emailVerified){
+      if(state.pendingAfterLogin === 'manage') await enterManage();
+      else await enterSetup();
+    } else {
+      alert('E-postan henüz doğrulanmamış görünüyor. Gelen kutundaki linke tıkladıktan sonra tekrar dene.');
+    }
+  }catch(e){
+    alert('Kontrol edilemedi, tekrar dener misin?');
+  }
+}
+
+async function forgotPassword(){
+  const emailEl = document.getElementById('loginEmail');
+  let email = emailEl ? emailEl.value.trim() : '';
+  if(!email){
+    email = prompt('Şifre sıfırlama linki için e-posta adresini gir:');
+    if(!email) return;
+  }
+  try{
+    await auth.sendPasswordResetEmail(email);
+    alert('"' + email + '" adresine şifre sıfırlama linki gönderildi. Gelen kutunu (ve spam klasörünü) kontrol et.');
+  }catch(e){
+    alert('Gönderilemedi. E-posta adresini kontrol edip tekrar dener misin?');
+  }
+}
+
 async function doRegister(){
   const email = document.getElementById('loginEmail').value.trim();
   const pw = document.getElementById('loginPass').value;
@@ -535,6 +592,7 @@ async function doRegister(){
   }
   try{
     const cred = await auth.createUserWithEmailAndPassword(email, pw);
+    await cred.user.sendEmailVerification();
     await db.collection('admins').doc(cred.user.uid).set({
       email, name: displayName || email, approved: false, createdAt: Date.now()
     });
@@ -583,6 +641,8 @@ async function enterSetup(){
   state.activeTemplateTitle = '';
   state.surveyEnabled = false;
   state.draftSurveyQuestions = DEFAULT_SURVEY_QUESTIONS.slice();
+  state.draftShareWithAdmins = false;
+  state.draftHideFromSuperAdmin = false;
   state.aiError = '';
   render();
   await loadTemplates();
@@ -713,6 +773,16 @@ async function enterManage(){
     }
   }
   render();
+}
+
+async function resetAdminPassword(email){
+  if(!confirm('"' + email + '" adresine şifre sıfırlama linki gönderilsin mi?')) return;
+  try{
+    await auth.sendPasswordResetEmail(email);
+    alert('Şifre sıfırlama linki gönderildi.');
+  }catch(e){
+    alert('Gönderilemedi, tekrar dener misin?');
+  }
 }
 
 async function approveAdmin(uid){
@@ -954,7 +1024,14 @@ async function loadTemplates(){
       db.collection('templates').where('sharedWithAdmins', '==', true).get()
     ]);
     const list = [];
-    ownSnap.forEach(d => list.push({ id: d.id, ...d.data() }));
+    ownSnap.forEach(d => {
+      const data = d.data();
+      list.push({
+        id: d.id, ...data,
+        pendingShared: !!data.sharedWithAdmins,
+        pendingHidden: !!data.hiddenFromSuperAdmin
+      });
+    });
     list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
     state.templates = list;
 
@@ -996,12 +1073,19 @@ async function saveTemplate(){
       questions: state.draftQuestions,
       createdBy: auth.currentUser.uid,
       createdByEmail: auth.currentUser.email,
-      sharedWithAdmins: false,
-      hiddenFromSuperAdmin: false,
+      sharedWithAdmins: !!state.draftShareWithAdmins,
+      hiddenFromSuperAdmin: !!state.draftHideFromSuperAdmin,
       createdAt: Date.now()
     });
+    if(state.draftHideFromSuperAdmin){
+      await db.collection('admins').doc(auth.currentUser.uid).update({
+        hiddenTemplateCount: firebase.firestore.FieldValue.increment(1)
+      });
+    }
     state.activeTemplateId = docRef.id;
     state.activeTemplateTitle = title.trim();
+    state.draftShareWithAdmins = false;
+    state.draftHideFromSuperAdmin = false;
     await loadTemplates();
     render();
   }catch(e){
@@ -1021,30 +1105,41 @@ function useTemplate(id){
   render();
 }
 
-async function toggleTemplateShare(id){
+function toggleTemplateShare(id){
   const t = state.templates.find(x => x.id === id);
   if(!t) return;
-  const newVal = !t.sharedWithAdmins;
-  try{
-    await db.collection('templates').doc(id).update({ sharedWithAdmins: newVal });
-    t.sharedWithAdmins = newVal;
-    render();
-  }catch(e){
-    alert('Güncellenemedi, tekrar dener misin?');
-  }
+  t.pendingShared = !t.pendingShared;
+  render();
 }
 
-async function toggleTemplateHidden(id){
+function toggleTemplateHidden(id){
   const t = state.templates.find(x => x.id === id);
   if(!t) return;
-  const newVal = !t.hiddenFromSuperAdmin;
+  t.pendingHidden = !t.pendingHidden;
+  render();
+}
+
+function templateHasPendingChanges(t){
+  return !!t.pendingShared !== !!t.sharedWithAdmins || !!t.pendingHidden !== !!t.hiddenFromSuperAdmin;
+}
+
+async function applyTemplateVisibility(id){
+  const t = state.templates.find(x => x.id === id);
+  if(!t) return;
+  const wasHidden = !!t.hiddenFromSuperAdmin;
+  const nowHidden = !!t.pendingHidden;
   try{
-    await db.collection('templates').doc(id).update({ hiddenFromSuperAdmin: newVal });
-    t.hiddenFromSuperAdmin = newVal;
-    // Sayısal sayaç: içerik gizli kalır, sadece "kaç tane gizli şablonu var" bilgisi süper adminle paylaşılır
-    await db.collection('admins').doc(auth.currentUser.uid).update({
-      hiddenTemplateCount: firebase.firestore.FieldValue.increment(newVal ? 1 : -1)
+    await db.collection('templates').doc(id).update({
+      sharedWithAdmins: !!t.pendingShared,
+      hiddenFromSuperAdmin: nowHidden
     });
+    if(wasHidden !== nowHidden){
+      await db.collection('admins').doc(auth.currentUser.uid).update({
+        hiddenTemplateCount: firebase.firestore.FieldValue.increment(nowHidden ? 1 : -1)
+      });
+    }
+    t.sharedWithAdmins = !!t.pendingShared;
+    t.hiddenFromSuperAdmin = nowHidden;
     render();
   }catch(e){
     alert('Güncellenemedi, tekrar dener misin?');
@@ -1656,7 +1751,8 @@ function leaveSession(){
     answerCount:0, correctCount:0, leaderboard:null, errorMsg:'',
     unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
     unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAdmins:null, pendingAfterLogin:'setup',
-    detailReport:null, surveyEnabled:false, draftSurveyQuestions:[], mySurveyAnswer:null, surveyResults:null
+    detailReport:null, surveyEnabled:false, draftSurveyQuestions:[], mySurveyAnswer:null, surveyResults:null,
+    draftShareWithAdmins:false, draftHideFromSuperAdmin:false
   };
   render();
 }
@@ -1680,6 +1776,7 @@ function viewFor(view){
     case 'login': return loginView();
     case 'register': return registerView();
     case 'register-done': return registerDoneView();
+    case 'verify-email': return verifyEmailView();
     case 'host-setup': return hostSetupView();
     case 'host-live': return hostLiveView();
     case 'host-results': return hostResultsView();
@@ -1706,8 +1803,23 @@ function loginView(){
       <input type="password" id="loginPass" placeholder="Şifre">
       ${state.errorMsg ? `<div class="error-msg">${state.errorMsg}</div>` : ''}
       <button class="btn btn-primary" onclick="cqApp.doLogin()">Giriş Yap</button>
+      <button class="muted-link" style="display:block;margin:10px auto 0;" onclick="cqApp.forgotPassword()">Şifremi unuttum</button>
     </div>
     <button class="muted-link" style="display:block;margin:0 auto;" onclick="cqApp.showRegisterView()">Hesabın yok mu? Kayıt ol</button>
+  `;
+}
+
+function verifyEmailView(){
+  return `
+    <div class="eyebrow">E-posta Doğrulama</div>
+    <h2>E-postanı doğrulamalısın</h2>
+    <div class="card">
+      <p><strong>${escapeHtml(auth.currentUser ? auth.currentUser.email : '')}</strong> adresine bir doğrulama linki gönderildi.</p>
+      <p class="dim">Gelen kutunu (ve spam klasörünü) kontrol et, linke tıkla, sonra aşağıdaki butona bas.</p>
+    </div>
+    <button class="btn btn-primary" onclick="cqApp.checkVerificationAndProceed()">✓ Doğruladım, Devam Et</button>
+    <button class="btn btn-secondary" style="margin-top:8px;" onclick="cqApp.resendVerification()">Doğrulama linkini tekrar gönder</button>
+    <button class="btn btn-secondary" style="margin-top:8px;" onclick="cqApp.doLogout()">Çıkış Yap</button>
   `;
 }
 
@@ -1731,9 +1843,10 @@ function registerView(){
 function registerDoneView(){
   return `
     <div class="eyebrow">Kayıt Alındı</div>
-    <h2>Onay bekleniyor</h2>
+    <h2>Son bir adım kaldı</h2>
     <div class="card">
-      <p>Kayıt talebin alındı. Yönetici onayladıktan sonra kayıtlı e-posta adresine onay maili gelecektir.</p>
+      <p><strong>1) E-postanı doğrula:</strong> Kayıt sırasında girdiğin adrese bir doğrulama linki gönderdik. Gelen kutunu kontrol edip linke tıkla.</p>
+      <p><strong>2) Onay bekle:</strong> E-postanı doğruladıktan sonra, yönetici hesabını onaylayınca giriş yapıp oturum oluşturabileceksin.</p>
     </div>
     <button class="btn btn-secondary" onclick="cqApp.goHome()">Ana Sayfa</button>
   `;
@@ -1906,6 +2019,9 @@ function manageView(){
           <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 50)">+50 Kredi</button>
           <button class="btn btn-secondary" onclick="cqApp.grantAiSubscription('${a.uid}')">📅 30 Gün Abonelik Ver</button>
         </div>
+        <div class="btn-row" style="margin-top:6px;">
+          <button class="btn btn-secondary" onclick="cqApp.resetAdminPassword('${escapeHtml(a.email)}')">🔑 Şifre Sıfırlama Linki Gönder</button>
+        </div>
       </div>
     `;}).join('');
     pendingSection = `
@@ -1971,14 +2087,15 @@ function hostSetupView(){
       </div>
       <div class="row" style="margin-top:6px;">
         <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
-          <input type="checkbox" ${t.sharedWithAdmins ? 'checked' : ''} onchange="cqApp.toggleTemplateShare('${t.id}')">
-          🌐 Yöneticilerle paylaş
+          <input type="checkbox" ${t.pendingShared ? 'checked' : ''} onchange="cqApp.toggleTemplateShare('${t.id}')">
+          🌐 Diğer Sunucu/Öğretmen Hesaplarıyla Paylaş
         </label>
         <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
-          <input type="checkbox" ${t.hiddenFromSuperAdmin ? 'checked' : ''} onchange="cqApp.toggleTemplateHidden('${t.id}')">
+          <input type="checkbox" ${t.pendingHidden ? 'checked' : ''} onchange="cqApp.toggleTemplateHidden('${t.id}')">
           🔒 Süper adminden gizle
         </label>
       </div>
+      ${templateHasPendingChanges(t) ? `<button class="btn btn-gold" style="margin-top:8px;" onclick="cqApp.applyTemplateVisibility('${t.id}')">✓ Güncelle</button>` : ''}
     </div>
   `).join('');
 
@@ -2054,7 +2171,18 @@ function hostSetupView(){
       </div>
     </div>
     ${state.draftQuestions.length ? `<div class="card"><h3 style="font-size:15px;">Sorular (${state.draftQuestions.length})</h3>${qItems}
-      <button class="btn btn-secondary" style="margin-top:4px;" onclick="cqApp.saveTemplate()">💾 Şablon Olarak Kaydet</button>
+      <div class="row" style="margin-top:10px;">
+        <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
+          <input type="checkbox" ${state.draftShareWithAdmins ? 'checked' : ''} onchange="cqApp.setDraftShareWithAdmins(this.checked)">
+          🌐 Diğer Sunucu/Öğretmen Hesaplarıyla Paylaş
+        </label>
+        <label class="dim" style="font-size:11px;display:flex;align-items:center;gap:5px;cursor:pointer;">
+          <input type="checkbox" ${state.draftHideFromSuperAdmin ? 'checked' : ''} onchange="cqApp.setDraftHideFromSuperAdmin(this.checked)">
+          🔒 Süper adminden gizle
+        </label>
+      </div>
+      <p class="dim" style="font-size:11px;margin:4px 0 0;">Bu tercihleri daha sonra "Kayıtlı Quizlerim" listesinden de değiştirebilirsin.</p>
+      <button class="btn btn-secondary" style="margin-top:8px;" onclick="cqApp.saveTemplate()">💾 Şablon Olarak Kaydet</button>
     </div>` : ''}
     <div class="card">
       <div class="row">
@@ -2431,7 +2559,9 @@ window.cqApp = {
   renameParticipant, shareMyResult, reportIssue,
   openMyHistory, openMyHistoryDetail,
   generateAiQuestions, addAiCredits, grantAiSubscription,
-  toggleTemplateShare, toggleTemplateHidden, toggleTemplateDetail
+  toggleTemplateShare, toggleTemplateHidden, toggleTemplateDetail,
+  forgotPassword, resetAdminPassword, resendVerification, checkVerificationAndProceed,
+  setDraftShareWithAdmins, setDraftHideFromSuperAdmin, applyTemplateVisibility
 };
 
 render();
