@@ -299,6 +299,7 @@ let state = {
   draftSurveyQuestions: [],
   draftShareWithAdmins: false,
   draftHideFromSuperAdmin: false,
+  draftOriginalOwner: null,
   mySurveyAnswer: null,
   surveyResults: null,
   participantId: null,
@@ -320,6 +321,8 @@ let state = {
   mySessions: null,
   pendingAdmins: null,
   allTemplatesForSuperAdmin: null,
+  dashboardTab: 'overview',
+  activeSessionsDetail: null,
   pendingAfterLogin: 'setup',
   detailReport: null,
   myHistory: null,
@@ -643,6 +646,7 @@ async function enterSetup(){
   state.draftSurveyQuestions = DEFAULT_SURVEY_QUESTIONS.slice();
   state.draftShareWithAdmins = false;
   state.draftHideFromSuperAdmin = false;
+  state.draftOriginalOwner = null;
   state.aiError = '';
   render();
   await loadTemplates();
@@ -737,6 +741,8 @@ async function enterManage(){
   state.view = 'manage';
   state.mySessions = null;
   state.pendingAdmins = null;
+  state.dashboardTab = 'overview';
+  state.activeSessionsDetail = null;
   render();
   try{
     let snap;
@@ -1067,12 +1073,17 @@ async function saveTemplate(){
   }
   const title = prompt('Bu soru setine bir isim ver (örn. "Hijyen Eğitimi - Modül 1"):');
   if(!title || !title.trim()) return;
+  // Bu sorular başka birinin paylaştığı bir şablondan geliyorsa, "ilk sahip" bilgisi korunur —
+  // kim güncelleyip yeniden kaydederse kaydetsin, gerçek sahip değişmez.
+  const original = state.draftOriginalOwner;
   try{
     const docRef = await db.collection('templates').add({
       title: title.trim(),
       questions: state.draftQuestions,
       createdBy: auth.currentUser.uid,
       createdByEmail: auth.currentUser.email,
+      originalCreatedBy: original ? original.uid : auth.currentUser.uid,
+      originalCreatedByEmail: original ? original.email : auth.currentUser.email,
       sharedWithAdmins: !!state.draftShareWithAdmins,
       hiddenFromSuperAdmin: !!state.draftHideFromSuperAdmin,
       createdAt: Date.now()
@@ -1086,6 +1097,7 @@ async function saveTemplate(){
     state.activeTemplateTitle = title.trim();
     state.draftShareWithAdmins = false;
     state.draftHideFromSuperAdmin = false;
+    state.draftOriginalOwner = null;
     await loadTemplates();
     render();
   }catch(e){
@@ -1098,9 +1110,15 @@ function useTemplate(id){
   if(!t) return;
   state.draftQuestions = JSON.parse(JSON.stringify(t.questions));
   if(!state.draftTitle) state.draftTitle = t.title;
+  const isOwn = t.createdBy === auth.currentUser.uid;
   // Başkasının paylaştığı şablonu kullanıyorsan, otomatik-senkron sadece kendi şablonların için geçerli
-  state.activeTemplateId = (t.createdBy === auth.currentUser.uid) ? id : null;
+  state.activeTemplateId = isOwn ? id : null;
   state.activeTemplateTitle = t.title;
+  // "İlk sahip" bilgisini, zincirleme paylaşımlarda bile en baştaki kişiye kadar takip ediyoruz
+  state.draftOriginalOwner = isOwn ? null : {
+    uid: t.originalCreatedBy || t.createdBy,
+    email: t.originalCreatedByEmail || t.createdByEmail
+  };
   state.errorMsg = '';
   render();
 }
@@ -1752,7 +1770,7 @@ function leaveSession(){
     unsubQuiz:null, unsubAnswers:null, templates:[], templatesLoaded:false,
     unsubParticipants:null, participantsList:[], answeredPids:null, mySessions:null, pendingAdmins:null, pendingAfterLogin:'setup',
     detailReport:null, surveyEnabled:false, draftSurveyQuestions:[], mySurveyAnswer:null, surveyResults:null,
-    draftShareWithAdmins:false, draftHideFromSuperAdmin:false
+    draftShareWithAdmins:false, draftHideFromSuperAdmin:false, draftOriginalOwner:null
   };
   render();
 }
@@ -1953,11 +1971,187 @@ function homeView(){
   `;
 }
 
+async function switchDashboardTab(tab){
+  state.dashboardTab = tab;
+  render();
+  if(tab === 'active' && state.activeSessionsDetail === null){
+    await loadActiveSessionsDetail();
+  }
+}
+
+// Aktif (bitmemiş) oturumların canlı katılımcı sayısını çeker
+async function loadActiveSessionsDetail(){
+  const active = (state.mySessions || []).filter(s => !s.ended);
+  const withCounts = [];
+  for(const s of active){
+    let count = 0;
+    try{
+      const snap = await db.collection('quizzes').doc(s.code).collection('participants').get();
+      count = snap.size;
+    }catch(e){}
+    withCounts.push({ ...s, participantCount: count });
+  }
+  withCounts.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+  state.activeSessionsDetail = withCounts;
+  render();
+}
+
 function manageView(){
   if(state.mySessions === null){
     return `<div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button></div><p class="dim">Yükleniyor…</p>`;
   }
   const superAdmin = isSuperAdmin();
+
+  if(!superAdmin){
+    return normalAdminSessionsView();
+  }
+
+  const tabs = [
+    { id: 'overview', label: '📊 Genel Bakış' },
+    { id: 'active', label: '🟢 Aktif Oturumlar' },
+    { id: 'pending', label: '🔔 Bekleyen İşlemler' },
+    { id: 'detail', label: '🗂 Detaylı Yönetim' }
+  ];
+  const tabBar = `
+    <div style="display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px;">
+      ${tabs.map(t => `<button class="btn ${state.dashboardTab===t.id ? 'btn-primary' : 'btn-secondary'}" style="width:auto;white-space:nowrap;padding:9px 14px;font-size:13px;" onclick="cqApp.switchDashboardTab('${t.id}')">${t.label}</button>`).join('')}
+    </div>
+  `;
+
+  let body = '';
+  if(state.dashboardTab === 'overview') body = dashboardOverviewView();
+  else if(state.dashboardTab === 'active') body = dashboardActiveView();
+  else if(state.dashboardTab === 'pending') body = dashboardPendingView();
+  else body = dashboardDetailView();
+
+  return `
+    <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
+    <div class="eyebrow">Yönetici Paneli</div>
+    <h2>Dashboard</h2>
+    ${tabBar}
+    ${body}
+  `;
+}
+
+function dashboardOverviewView(){
+  const sessions = state.mySessions || [];
+  const admins = state.pendingAdmins || [];
+  const approved = admins.filter(a => a.approved);
+  const pending = admins.filter(a => !a.approved);
+  const activeSessions = sessions.filter(s => !s.ended);
+  const liveNow = sessions.filter(s => !s.ended && s.started);
+  const totalCredits = approved.reduce((sum,a) => sum + (a.aiCredits||0), 0);
+  const now = Date.now();
+  const activeSubs = approved.filter(a => a.aiSubscriptionUntil && a.aiSubscriptionUntil > now);
+  const templates = state.allTemplatesForSuperAdmin || [];
+  const sharedTemplates = templates.filter(t => t.sharedWithAdmins);
+
+  function statCard(icon, label, value, color){
+    return `
+    <div class="card" style="text-align:center;padding:16px 12px;">
+      <div style="font-size:22px;">${icon}</div>
+      <div style="font-size:26px;font-weight:800;color:${color || 'var(--text)'};margin:4px 0;">${value}</div>
+      <div class="dim" style="font-size:12px;">${label}</div>
+    </div>`;
+  }
+
+  return `
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">
+      ${statCard('👥', 'Onaylı Yönetici', approved.length, 'var(--lime)')}
+      ${statCard('⏳', 'Bekleyen Kayıt', pending.length, pending.length ? 'var(--gold)' : 'var(--text)')}
+      ${statCard('📝', 'Toplam Oturum', sessions.length)}
+      ${statCard('🟢', 'Aktif Oturum', activeSessions.length, activeSessions.length ? 'var(--lime)' : 'var(--text)')}
+      ${statCard('▶️', 'Şu An Canlı (soru açık)', liveNow.length, liveNow.length ? 'var(--coral)' : 'var(--text)')}
+      ${statCard('✨', 'Dağıtılmış AI Kredisi', totalCredits)}
+      ${statCard('📅', 'Aktif Abonelik', activeSubs.length)}
+      ${statCard('🌐', 'Paylaşılan Şablon', sharedTemplates.length)}
+    </div>
+    <p class="dim" style="font-size:11px;text-align:center;margin-top:10px;">Detaylar için üstteki sekmeleri kullan.</p>
+  `;
+}
+
+function dashboardActiveView(){
+  if(state.activeSessionsDetail === null){
+    return `<p class="dim">Yükleniyor…</p>`;
+  }
+  const list = state.activeSessionsDetail;
+  if(list.length === 0){
+    return `<div class="card"><p class="dim" style="margin:0;">Şu anda devam eden bir oturum yok.</p></div>`;
+  }
+  const rows = list.map(s => {
+    const total = (s.questions||[]).length;
+    const status = s.started ? 'Devam Ediyor' : 'Lobide Bekliyor';
+    const statusColor = s.started ? 'var(--lime)' : 'var(--gold)';
+    return `
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row" style="margin-bottom:2px;">
+        <span style="font-family:var(--font-display);font-weight:700;">${escapeHtml(s.title || ('Oturum ' + s.code))}</span>
+        <span style="font-size:12px;color:${statusColor};">${status}</span>
+      </div>
+      <div class="row" style="margin-bottom:4px;">
+        <span style="font-size:12px;color:var(--lime);">Kod: ${s.code}</span>
+        <span class="dim" style="font-size:11px;">👤 ${escapeHtml(s.createdByEmail || 'bilinmiyor')}</span>
+      </div>
+      <div class="row" style="margin-bottom:8px;">
+        <span class="dim" style="font-size:12px;">👥 ${s.participantCount} katılımcı</span>
+        <span class="dim" style="font-size:12px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</span>
+      </div>
+      <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
+    </div>`;
+  }).join('');
+  return `<div class="card"><h3 style="font-size:15px;">🟢 Aktif Oturumlar (${list.length})</h3>${rows}</div>`;
+}
+
+function dashboardPendingView(){
+  const admins = state.pendingAdmins || [];
+  const pending = admins.filter(a => !a.approved);
+  const approved = admins.filter(a => a.approved);
+  const now = Date.now();
+  const sevenDays = 7 * 86400000;
+  const expiringSoon = approved.filter(a => a.aiSubscriptionUntil && a.aiSubscriptionUntil > now && a.aiSubscriptionUntil <= now + sevenDays);
+  const noCreditsNoSub = approved.filter(a => (a.aiCredits||0) === 0 && !(a.aiSubscriptionUntil && a.aiSubscriptionUntil > now));
+
+  const pendingRows = pending.map(a => `
+    <div class="qlist-item">
+      <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">${escapeHtml(a.email)}</span></span>
+      <div style="display:flex;gap:8px;">
+        <button class="muted-link" onclick="cqApp.approveAdmin('${a.uid}')">✓ Onayla</button>
+        <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')">✕</button>
+      </div>
+    </div>
+  `).join('');
+
+  const expiringRows = expiringSoon.map(a => `
+    <div class="qlist-item">
+      <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">Abonelik ${fmtDate(a.aiSubscriptionUntil)} tarihinde bitiyor</span></span>
+      <button class="btn btn-secondary" style="width:auto;" onclick="cqApp.grantAiSubscription('${a.uid}')">📅 Uzat</button>
+    </div>
+  `).join('');
+
+  const noCreditRows = noCreditsNoSub.map(a => `
+    <div class="qlist-item">
+      <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">AI kredisi/aboneliği yok</span></span>
+      <button class="btn btn-secondary" style="width:auto;" onclick="cqApp.addAiCredits('${a.uid}', 10)">+10 Kredi</button>
+    </div>
+  `).join('');
+
+  return `
+    <div class="card">
+      <h3 style="font-size:15px;">⏳ Bekleyen Onaylar (${pending.length})</h3>
+      ${pending.length ? pendingRows : '<p class="dim" style="font-size:13px;">Bekleyen kayıt yok.</p>'}
+    </div>
+    <div class="card">
+      <h3 style="font-size:15px;">📅 Yakında Bitecek Abonelikler (${expiringSoon.length})</h3>
+      ${expiringSoon.length ? expiringRows : '<p class="dim" style="font-size:13px;">Önümüzdeki 7 gün içinde biten abonelik yok.</p>'}
+    </div>
+    <div class="card">
+      <h3 style="font-size:15px;">✨ Kredisi/Aboneliği Olmayan Yöneticiler (${noCreditsNoSub.length})</h3>
+      ${noCreditsNoSub.length ? noCreditRows : '<p class="dim" style="font-size:13px;">Herkeste kredi ya da abonelik var.</p>'}
+    </div>
+  `;
+}
+
+function normalAdminSessionsView(){
   const rows = state.mySessions.map(s => {
     const total = (s.questions||[]).length;
     const status = s.ended ? 'Bitti' : (s.started ? 'Devam Ediyor' : 'Lobide Bekliyor');
@@ -1972,7 +2166,6 @@ function manageView(){
         <span style="font-size:12px;color:var(--lime);">Kod: ${s.code}</span>
         <span class="dim" style="font-size:11px;">${fmtDate(s.createdAt)}</span>
       </div>
-      ${superAdmin ? `<p class="dim" style="font-size:11px;margin:0 0 4px;">👤 ${escapeHtml(s.createdByEmail || 'bilinmiyor')}</p>` : ''}
       <p class="dim" style="font-size:12px;margin:0 0 8px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</p>
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
@@ -1985,78 +2178,108 @@ function manageView(){
     </div>`;
   }).join('');
 
-  let pendingSection = '';
-  if(superAdmin){
-    const pending = (state.pendingAdmins||[]).filter(a => !a.approved);
-    const approved = (state.pendingAdmins||[]).filter(a => a.approved);
-    const pendingRows = pending.map(a => `
-      <div class="qlist-item">
-        <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">${escapeHtml(a.email)}</span></span>
-        <div style="display:flex;gap:8px;">
-          <button class="muted-link" onclick="cqApp.approveAdmin('${a.uid}')">✓ Onayla</button>
-          <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')">✕</button>
-        </div>
-      </div>
-    `).join('');
-    const approvedRows = approved.map(a => {
-      const subActive = a.aiSubscriptionUntil && a.aiSubscriptionUntil > Date.now();
-      const subLabel = subActive ? ('Abonelik: ' + fmtDate(a.aiSubscriptionUntil) + ' tarihine kadar') : 'Abonelik yok';
-      return `
-      <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
-        <div class="row" style="margin-bottom:4px;">
-          <span>${escapeHtml(a.name || a.email)} <span class="dim">(${escapeHtml(a.email)})</span></span>
-          <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')" title="Erişimi kaldır">✕</button>
-        </div>
-        <div class="row" style="margin-bottom:6px;">
-          <span class="dim" style="font-size:12px;">✨ AI Kredisi: ${a.aiCredits || 0}</span>
-          <span class="dim" style="font-size:11px;">${subLabel}</span>
-        </div>
-        <div class="row" style="margin-bottom:6px;">
-          <span class="dim" style="font-size:12px;">🔒 Gizli şablon sayısı: ${a.hiddenTemplateCount || 0}</span>
-        </div>
-        <div class="btn-row">
-          <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 10)">+10 Kredi</button>
-          <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 50)">+50 Kredi</button>
-          <button class="btn btn-secondary" onclick="cqApp.grantAiSubscription('${a.uid}')">📅 30 Gün Abonelik Ver</button>
-        </div>
-        <div class="btn-row" style="margin-top:6px;">
-          <button class="btn btn-secondary" onclick="cqApp.resetAdminPassword('${escapeHtml(a.email)}')">🔑 Şifre Sıfırlama Linki Gönder</button>
-        </div>
-      </div>
-    `;}).join('');
-    pendingSection = `
-      <div class="card">
-        <h3 style="font-size:15px;">Bekleyen Onaylar (${pending.length})</h3>
-        ${pending.length ? pendingRows : '<p class="dim" style="font-size:13px;">Bekleyen kayıt yok.</p>'}
-      </div>
-      ${approved.length ? `<div class="card"><h3 style="font-size:15px;">Onaylı Yöneticiler (${approved.length})</h3>${approvedRows}</div>` : ''}
-    `;
-
-    const tplList = state.allTemplatesForSuperAdmin || [];
-    const tplRows = tplList.map(t => `
-      <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
-        <div class="row">
-          <span>${escapeHtml(t.title)} <span class="dim" style="font-size:11px;">· ${(t.questions||[]).length} soru · ${escapeHtml(t.createdByEmail || 'bilinmiyor')}${t.sharedWithAdmins ? ' · 🌐 paylaşılıyor' : ''}</span></span>
-          <button class="muted-link" onclick="cqApp.toggleTemplateDetail('${t.id}')">${t.expanded ? 'Gizle' : 'Soruları Gör'}</button>
-        </div>
-        ${t.expanded ? `<div style="margin-top:8px;">${(t.questions||[]).map((q,i)=>`<p class="dim" style="font-size:12px;margin:4px 0;">${i+1}. ${escapeHtml(q.q)}</p>`).join('')}</div>` : ''}
-      </div>
-    `).join('');
-    pendingSection += `
-      <div class="card">
-        <h3 style="font-size:15px;">📋 Tüm Kayıtlı Şablonlar (${tplList.length})</h3>
-        <p class="dim" style="font-size:11px;">Yöneticilerin "süper adminden gizle" işaretlemediği şablonlar burada listelenir. Gizlenen şablonlar bu listede hiç görünmez.</p>
-        ${tplList.length ? tplRows : '<p class="dim" style="font-size:13px;">Görüntülenebilir şablon yok.</p>'}
-      </div>
-    `;
-  }
-
   return `
     <div class="top-bar"><button class="muted-link" onclick="cqApp.goHome()">← Geri</button><button class="muted-link" onclick="cqApp.doLogout()">Çıkış Yap</button></div>
-    <div class="eyebrow">${superAdmin ? 'Süper Admin Paneli' : 'Oturumlarım'}</div>
-    <h2>${superAdmin ? 'Tüm oturumlar' : 'Oluşturduğun oturumlar'}</h2>
-    ${pendingSection}
+    <div class="eyebrow">Oturumlarım</div>
+    <h2>Oluşturduğun oturumlar</h2>
     <div class="card">
+      ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturulmadı.</p>'}
+    </div>
+    <button class="btn btn-primary" onclick="cqApp.startHostSetup()">+ Yeni Oturum Oluştur</button>
+    <button class="btn btn-secondary" style="color:var(--coral);margin-top:16px;" onclick="cqApp.deleteMyAccount()">🗑 Hesabımı Sil</button>
+  `;
+}
+
+function dashboardDetailView(){
+  const rows = state.mySessions.map(s => {
+    const total = (s.questions||[]).length;
+    const status = s.ended ? 'Bitti' : (s.started ? 'Devam Ediyor' : 'Lobide Bekliyor');
+    const statusColor = s.ended ? 'var(--text-dim)' : (s.started ? 'var(--lime)' : 'var(--gold)');
+    return `
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row" style="margin-bottom:2px;">
+        <span style="font-family:var(--font-display);font-weight:700;">${escapeHtml(s.title || ('Oturum ' + s.code))}</span>
+        <span style="font-size:12px;color:${statusColor};">${status}</span>
+      </div>
+      <div class="row" style="margin-bottom:6px;">
+        <span style="font-size:12px;color:var(--lime);">Kod: ${s.code}</span>
+        <span class="dim" style="font-size:11px;">${fmtDate(s.createdAt)}</span>
+      </div>
+      <p class="dim" style="font-size:11px;margin:0 0 4px;">👤 ${escapeHtml(s.createdByEmail || 'bilinmiyor')}</p>
+      <p class="dim" style="font-size:12px;margin:0 0 8px;">Soru ${Math.min((s.currentIndex||0)+1,total)}/${total}</p>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="cqApp.manageSession('${s.code}')">Yönet</button>
+        <button class="btn btn-secondary" onclick="cqApp.manageResults('${s.code}')">Sonuç</button>
+      </div>
+      <div class="btn-row" style="margin-top:6px;">
+        <button class="btn btn-secondary" onclick="cqApp.renameSession('${s.code}')">✎ İsim Değiştir</button>
+        <button class="btn btn-secondary" style="color:var(--coral);" onclick="cqApp.deleteSession('${s.code}')">🗑 Sil</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  const pending = (state.pendingAdmins||[]).filter(a => !a.approved);
+  const approved = (state.pendingAdmins||[]).filter(a => a.approved);
+  const pendingRows = pending.map(a => `
+    <div class="qlist-item">
+      <span>${escapeHtml(a.name || a.email)}<br><span class="dim" style="font-size:11px;">${escapeHtml(a.email)}</span></span>
+      <div style="display:flex;gap:8px;">
+        <button class="muted-link" onclick="cqApp.approveAdmin('${a.uid}')">✓ Onayla</button>
+        <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')">✕</button>
+      </div>
+    </div>
+  `).join('');
+  const approvedRows = approved.map(a => {
+    const subActive = a.aiSubscriptionUntil && a.aiSubscriptionUntil > Date.now();
+    const subLabel = subActive ? ('Abonelik: ' + fmtDate(a.aiSubscriptionUntil) + ' tarihine kadar') : 'Abonelik yok';
+    return `
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row" style="margin-bottom:4px;">
+        <span>${escapeHtml(a.name || a.email)} <span class="dim">(${escapeHtml(a.email)})</span></span>
+        <button class="small-x" onclick="cqApp.rejectAdmin('${a.uid}')" title="Erişimi kaldır">✕</button>
+      </div>
+      <div class="row" style="margin-bottom:6px;">
+        <span class="dim" style="font-size:12px;">✨ AI Kredisi: ${a.aiCredits || 0}</span>
+        <span class="dim" style="font-size:11px;">${subLabel}</span>
+      </div>
+      <div class="row" style="margin-bottom:6px;">
+        <span class="dim" style="font-size:12px;">🔒 Gizli şablon sayısı: ${a.hiddenTemplateCount || 0}</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 10)">+10 Kredi</button>
+        <button class="btn btn-secondary" onclick="cqApp.addAiCredits('${a.uid}', 50)">+50 Kredi</button>
+        <button class="btn btn-secondary" onclick="cqApp.grantAiSubscription('${a.uid}')">📅 30 Gün Abonelik Ver</button>
+      </div>
+      <div class="btn-row" style="margin-top:6px;">
+        <button class="btn btn-secondary" onclick="cqApp.resetAdminPassword('${escapeHtml(a.email)}')">🔑 Şifre Sıfırlama Linki Gönder</button>
+      </div>
+    </div>
+  `;}).join('');
+
+  const tplList = state.allTemplatesForSuperAdmin || [];
+  const tplRows = tplList.map(t => `
+    <div class="qlist-item" style="flex-direction:column;align-items:stretch;">
+      <div class="row">
+        <span>${escapeHtml(t.title)} <span class="dim" style="font-size:11px;">· ${(t.questions||[]).length} soru · ${escapeHtml(t.originalCreatedByEmail || t.createdByEmail || 'bilinmiyor')}${t.sharedWithAdmins ? ' · 🌐 paylaşılıyor' : ''}</span></span>
+        <button class="muted-link" onclick="cqApp.toggleTemplateDetail('${t.id}')">${t.expanded ? 'Gizle' : 'Soruları Gör'}</button>
+      </div>
+      ${t.expanded ? `<div style="margin-top:8px;">${(t.questions||[]).map((q,i)=>`<p class="dim" style="font-size:12px;margin:4px 0;">${i+1}. ${escapeHtml(q.q)}</p>`).join('')}</div>` : ''}
+    </div>
+  `).join('');
+
+  return `
+    <div class="card">
+      <h3 style="font-size:15px;">Bekleyen Onaylar (${pending.length})</h3>
+      ${pending.length ? pendingRows : '<p class="dim" style="font-size:13px;">Bekleyen kayıt yok.</p>'}
+    </div>
+    ${approved.length ? `<div class="card"><h3 style="font-size:15px;">Onaylı Yöneticiler (${approved.length})</h3>${approvedRows}</div>` : ''}
+    <div class="card">
+      <h3 style="font-size:15px;">📋 Tüm Kayıtlı Şablonlar (${tplList.length})</h3>
+      <p class="dim" style="font-size:11px;">Yöneticilerin "süper adminden gizle" işaretlemediği şablonlar burada listelenir. Gizlenen şablonlar bu listede hiç görünmez.</p>
+      ${tplList.length ? tplRows : '<p class="dim" style="font-size:13px;">Görüntülenebilir şablon yok.</p>'}
+    </div>
+    <div class="card">
+      <h3 style="font-size:15px;">Tüm Oturumlar (${state.mySessions.length})</h3>
       ${state.mySessions.length ? rows : '<p class="dim">Henüz hiç oturum oluşturulmadı.</p>'}
     </div>
     <button class="btn btn-primary" onclick="cqApp.startHostSetup()">+ Yeni Oturum Oluştur</button>
@@ -2101,7 +2324,7 @@ function hostSetupView(){
 
   const sharedTemplateItems = (state.sharedTemplates||[]).map(t => `
     <div class="qlist-item">
-      <span>${escapeHtml(t.title)} <span style="color:var(--text-dim);">· ${(t.questions||[]).length} soru · ${escapeHtml(t.createdByEmail || 'bir yönetici')}</span></span>
+      <span>${escapeHtml(t.title)} <span style="color:var(--text-dim);">· ${(t.questions||[]).length} soru · 🌐 paylaşılan şablon</span></span>
       <button class="muted-link" onclick="cqApp.useTemplate('${t.id}')">Kullan</button>
     </div>
   `).join('');
@@ -2561,7 +2784,8 @@ window.cqApp = {
   generateAiQuestions, addAiCredits, grantAiSubscription,
   toggleTemplateShare, toggleTemplateHidden, toggleTemplateDetail,
   forgotPassword, resetAdminPassword, resendVerification, checkVerificationAndProceed,
-  setDraftShareWithAdmins, setDraftHideFromSuperAdmin, applyTemplateVisibility
+  setDraftShareWithAdmins, setDraftHideFromSuperAdmin, applyTemplateVisibility,
+  switchDashboardTab
 };
 
 render();
