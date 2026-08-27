@@ -37,7 +37,7 @@
   justify-content:center;
   padding:24px 16px 60px;
 }
-#canli-quiz-widget #cq-app{width:100%;max-width:560px;}
+#canli-quiz-widget #cq-app{width:100%;max-width:760px;}
 #canli-quiz-widget h1,#canli-quiz-widget h2,#canli-quiz-widget h3{font-family:var(--font-display);margin:0 0 6px;overflow-wrap:break-word;}
 #canli-quiz-widget .eyebrow{
   font-family:var(--font-display);font-weight:700;font-size:12px;letter-spacing:.12em;
@@ -2013,8 +2013,8 @@ function manageView(){
     { id: 'detail', label: '🗂 Detaylı Yönetim' }
   ];
   const tabBar = `
-    <div style="display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px;">
-      ${tabs.map(t => `<button class="btn ${state.dashboardTab===t.id ? 'btn-primary' : 'btn-secondary'}" style="width:auto;white-space:nowrap;padding:9px 14px;font-size:13px;" onclick="cqApp.switchDashboardTab('${t.id}')">${t.label}</button>`).join('')}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">
+      ${tabs.map(t => `<button class="btn ${state.dashboardTab===t.id ? 'btn-primary' : 'btn-secondary'}" style="width:auto;flex:1 1 auto;min-width:140px;white-space:nowrap;padding:9px 12px;font-size:13px;" onclick="cqApp.switchDashboardTab('${t.id}')">${t.label}</button>`).join('')}
     </div>
   `;
 
